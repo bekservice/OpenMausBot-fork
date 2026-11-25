@@ -47,8 +47,14 @@ const subscriberCount = (channel) => listeners.get(channel)?.size ?? 0;
 test("exposes the full local-shell bridge on window.ogb", () => {
   assert.equal(exposed.name, "ogb");
   assert.equal(typeof exposed.api, "object");
-  // The settings channel is local-shell only, and this page is local (no --omb-local-origin in argv here).
   assert.equal(typeof exposed.api.onOpenAppSettings, "function");
+});
+
+test("desktopNotices keeps shown() for a Cloud page on an older release, and asks main nothing", async () => {
+  // 0.1.135's page calls desktopNotices.shown(...) as its Cloud Pro popup opens; without it the page threw and went blank.
+  const before = invocations.length;
+  assert.equal(await exposed.api.desktopNotices.shown("cloud-pro-update-2026-10"), false);
+  assert.deepEqual(invocations.slice(before), []);
 });
 
 test("openLogsFolder asks main for its own logs folder and names no path", async () => {
@@ -72,6 +78,15 @@ test("browser control forwards a separate per-device capability, not the cloud g
     ["companion:browser-control", "phone-1", true],
     ["companion:browser-control", "phone-1", false],
   ]);
+});
+
+test("the talk bridge asks main over its own channels with only what it understands", async () => {
+  const before = invocations.length;
+  await exposed.api.talkShortcut.state();
+  await exposed.api.talkShortcut.set({ enabled: false, key: "ctrl-shift-space", extra: "x" });
+  await exposed.api.callActive(true);
+  await exposed.api.callActive("yes");
+  assert.deepEqual(invocations.slice(before), [["talk-shortcut:state"], ["talk-shortcut:set", { enabled: false, key: "ctrl-shift-space" }], ["call:active", true], ["call:active", false]]);
 });
 
 test("account prepare asks for the secure address over its own channel and sends nothing from the page", async () => {
@@ -138,6 +153,22 @@ test("native Settings requests accept only the fixed organisation section, Cloud
   unsubscribe();
 });
 
+test("a Settings page name from Switch to This computer reaches Settings, also before React subscribes", async () => {
+  const calls = [];
+  const unsubscribe = exposed.api.onOpenAppSettings(section => calls.push(section));
+  try {
+    emit("app:open-settings", "app");
+    emit("app:open-settings", "account");
+    emit("app:open-settings", "phone");
+  } finally { unsubscribe(); }
+  assert.deepEqual(calls, ["app", "account", "phone"]);
+  emit("app:open-settings", "account");
+  const later = exposed.api.onOpenAppSettings(section => calls.push(section));
+  await Promise.resolve();
+  assert.deepEqual(calls.slice(3), ["account"]);
+  later();
+});
+
 test("a Cloud link arriving before React subscriptions is delivered exactly once after mount", async () => {
   emit("app:open-settings", "https://other.example");
   emit("app:open-settings", "cloud");
@@ -150,4 +181,11 @@ test("a Cloud link arriving before React subscriptions is delivered exactly once
   await Promise.resolve();
   assert.deepEqual(calls, ["cloud"], "later subscriptions must not reopen Settings");
   late();
+});
+
+test("the browser pane bridge asks main over its own channels with only the panel's input", async () => {
+  const before = invocations.length;
+  const input = { botId: "a", threadId: null, held: true };
+  await exposed.api.browserPane.hold(input);
+  assert.deepEqual(invocations.slice(before), [["browser-pane:hold", input]]);
 });

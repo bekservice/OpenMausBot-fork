@@ -1,10 +1,14 @@
 export declare const HIDDEN_ARG: string;
 export declare function autostartEntry(exec: string, options?: { lending?: boolean }): string;
-type LoginItem = { follow(on: boolean): void; startedHidden(): boolean; available(): boolean; chosen(): boolean; choose(on: boolean): void };
+type LoginItem = {
+  follow(on: boolean): void; startedHidden(): boolean; available(): boolean; chosen(): boolean; choose(on: boolean): void;
+  whenChosen(listener: () => void): void; hold(on: boolean): void; starts(): boolean; homeAdd(): boolean | null;
+  homeRelease(options?: { declined?: boolean | null; lending?: boolean }): void;
+};
 export declare function createOpenAtLogin(options: {
   app: {
     isPackaged: boolean;
-    getLoginItemSettings(options?: { args?: string[] }): { openAtLogin: boolean; wasOpenedAtLogin?: boolean; launchItems?: { name: string; enabled?: boolean }[] };
+    getLoginItemSettings(options?: { args?: string[] }): { openAtLogin: boolean; wasOpenedAtLogin?: boolean; launchItems?: { name: string; args?: string[]; enabled?: boolean }[] };
     setLoginItemSettings(settings: { openAtLogin: boolean; args?: string[]; name?: string }): void;
   };
   file: string;

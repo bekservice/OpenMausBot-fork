@@ -69,7 +69,7 @@ smoke as an authenticated connection to a customer's server.
 ## User flow
 
 In a desktop build with this feature, choose the server dropdown above the
-sidebar search → **Connect to a server…**, or open **Settings →
+sidebar search → **Connect to another computer…**, or open **Settings →
 Servers**. Enter the server's HTTPS address or full pairing link and an
 optional name. Confirm the host in the native dialog, then complete pairing or
 email sign-in on that server. To generate an owner link without the CLI's
@@ -89,10 +89,9 @@ connections or directly invoke switching, forgetting, or host-only controls.
 
 ## Optional computer sharing
 
-**Computer sharing is disabled by default.** The exception is lending a Mac
-to the person's own OMB Cloud home, which has its own switch and gate, and
-whose internet connection (only that) is lent by default; see
-`docs/cloud-pro.md`, "Use my Mac: Let my bots use this Mac".
+**Computer sharing is disabled by default.** The exception is a Mac lending
+itself to the person's own Clouds, which happens by itself with a gate of its
+own; see `docs/cloud-pro.md`, "This computer works for your Clouds".
 Connecting and switching hosted workspaces still works, but does not offer
 local file, terminal, or screen access. The flow below is maintainer-only
 verification with `features.sharedComputers: true` on both servers, not a

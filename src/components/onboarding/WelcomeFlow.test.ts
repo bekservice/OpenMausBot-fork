@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { introStaged, stageIntro, useChiefStepOpen } from "@/lib/default-bot";
 import { setLocale } from "@/lib/i18n";
-import { CLOUD_PRO_UPDATE_NOTICE } from "@/lib/notices";
+import { WHATS_NEW_NOTICE } from "@/lib/notices";
 import { EMPTY_ONBOARDING, MET_CHIEF_HINT, WELCOME_VERSION } from "@/lib/onboarding";
 import { saveWelcomeDraft } from "@/lib/welcome-draft";
 import type { InstanceInfo } from "@/state/store";
@@ -36,6 +36,8 @@ const freeOpenCode: InstanceInfo = {
   instanceId: "opencodeGo", driverKind: "opencodeGo", displayName: "OpenCode", install: { docsUrl: "https://example.test" },
   snapshot: { state: "available", authenticated: true, freeFallback: true }, models: { default: "opencode/big-pickle", options: [] }, aiTest: "passed",
 };
+const notInstalledOpenCode = { ...freeOpenCode, snapshot: { state: "unavailable" }, aiTest: undefined,
+  install: { docsUrl: "https://example.test", server: { standalone: { version: "1", downloadBytes: 1 } } } } as InstanceInfo;
 const signIn = (): InstanceInfo => ({ ...claude(false), snapshot: { state: "available", authenticated: false }, authentication: { method: "paste-code" } } as InstanceInfo);
 const maus = { id: "maus", threadId: "t", name: "MausBot", title: "", description: "", notifications: true, color: "chrome", unread: false,
   modelSelection: { instanceId: "claude", model: "m" }, messages: [], defaultBot: {}, chiefOfStaff: true };
@@ -64,17 +66,13 @@ const toChief = async (label = "Next") => {
   await tick(CHIEF_GUARD_MS);
 };
 const saved = () => f.api.mock.calls.filter(([path, init]) => path === "/api/config" && init?.method === "PUT").map(([, init]) => JSON.parse(init.body));
-const memoryStorage = () => {
-  const values = new Map<string, string>();
-  return { getItem: (k: string) => values.get(k) ?? null, setItem: (k: string, v: string) => void values.set(k, String(v)), removeItem: (k: string) => void values.delete(k), clear: () => values.clear() };
-};
 
 beforeEach(() => {
   vi.useFakeTimers();
   HTMLElement.prototype.animate = vi.fn(() => ({ onfinish: null, oncancel: null, cancel() {} }) as unknown as Animation);
   setLocale("en");
-  vi.stubGlobal("localStorage", memoryStorage());
-  vi.stubGlobal("sessionStorage", memoryStorage());
+  localStorage.clear();
+  sessionStorage.clear();
   f.dispatch.mockReset();
   f.landed.mockReset();
   f.onDone.mockReset();
@@ -100,7 +98,7 @@ afterEach(async () => {
 describe("a new install's first run", () => {
   it("is two screens with an AI already working: Next, then Create, and it lands in the Chief's chat", async () => {
     await show();
-    expect(host.querySelector("h1")?.textContent).toBe("Meet OpenMausBot");
+    expect(host.querySelector("h1")?.textContent).toBe("Meet MausBot");
     expect(host.querySelector("[data-demo-composer]")?.textContent, "reduced motion shows the whole sentence").toContain("Hand off any task to your team of bots");
     for (const gone of ["Step 1", "Back", "Skip", "Your name", "Connect an AI", "Set up later"]) expect(text()).not.toContain(gone);
     expect(button("Next")!.disabled).toBe(false);
@@ -164,27 +162,10 @@ describe("the Chief step", () => {
   });
 });
 
-describe("the Cloud Pro popup", () => {
-  const desktop = (extra: Record<string, unknown> = {}) => {
+describe("What's new", () => {
+  it("is left for a later launch by a first run on a desktop that sells the Cloud: everyone who installs sees it once", async () => {
     const seen = vi.fn(async () => {});
-    vi.stubGlobal("ogb", { remoteClient: { active: false }, cloudAccount: { offer: vi.fn() }, desktopNotices: { seen }, ...extra });
-    return seen;
-  };
-
-  it("is settled by a first run on a desktop that could offer the Cloud, so it never follows on the next launch", async () => {
-    const seen = desktop();
-    await show();
-    await toChief();
-    await press("Create Chief of Staff");
-    await tick(CHIEF_FADE_MS);
-    await act(async () => {});
-    expect(seen).toHaveBeenCalledWith(CLOUD_PRO_UPDATE_NOTICE);
-    expect(saved()[0].onboarding.hintsSeen).toEqual([MET_CHIEF_HINT, CLOUD_PRO_UPDATE_NOTICE]);
-    expect(localStorage.getItem(CLOUD_PRO_UPDATE_NOTICE)).toBe("1");
-  });
-
-  it("is left alone where the Cloud is never offered, and by a replay", async () => {
-    const seen = desktop({ cloudAccount: undefined });
+    vi.stubGlobal("ogb", { remoteClient: { active: false }, cloudAccount: { offer: vi.fn() }, desktopNotices: { seen } });
     await show();
     await toChief();
     await press("Create Chief of Staff");
@@ -192,6 +173,7 @@ describe("the Cloud Pro popup", () => {
     await act(async () => {});
     expect(seen).not.toHaveBeenCalled();
     expect(saved()[0].onboarding.hintsSeen).toEqual([MET_CHIEF_HINT]);
+    expect(localStorage.getItem(WHATS_NEW_NOTICE)).toBeNull();
   });
 });
 
@@ -199,13 +181,70 @@ describe("with no AI working yet", () => {
   it("keeps the screen's shape: the pill signs in, and the line under it offers other ways or later", async () => {
     f.state = { ...f.state, instances: [signIn()] };
     await show();
-    expect(host.querySelector("h1")?.textContent).toBe("Meet OpenMausBot");
+    expect(host.querySelector("h1")?.textContent).toBe("Meet MausBot");
     expect(button("Next")).toBeUndefined();
     expect(button("Sign in with Claude")).toBeDefined();
     expect(button("Other ways to connect")).toBeDefined();
     expect(host.querySelector("[data-engine-setup]"), "no setup card on the screen itself").toBeNull();
     await toChief("Set up later");
     expect(text()).toContain("Introducing your Chief of Staff");
+  });
+
+  it("offers Claude, ChatGPT and OpenCode as equal pills, Claude first and the one Enter presses", async () => {
+    const plan = { instanceId: "chatgpt", driverKind: "codex", displayName: "ChatGPT plan", install: { docsUrl: "https://example.test" },
+      snapshot: { state: "available", authenticated: false }, authentication: { method: "browser-pkce" }, models: { default: "m", options: [] } } as InstanceInfo;
+    f.state = { ...f.state, instances: [signIn(), plan, notInstalledOpenCode] };
+    await show();
+    const pills = [...host.querySelectorAll("[data-first-ais] button")].map((node) => node.textContent);
+    expect(pills).toEqual(["Sign in with Claude", "Sign in with ChatGPT", "Install OpenCode"]);
+    expect([...host.querySelectorAll("[data-primary]")].map((node) => node.textContent), "one primary pill").toEqual(["Sign in with Claude"]);
+    expect(button("Other ways to connect")).toBeDefined();
+    expect(button("Set up later")).toBeDefined();
+  });
+
+  it("says Set up ChatGPT, not Install, while Codex isn't on this computer yet", async () => {
+    const plan = { instanceId: "chatgpt", driverKind: "codex", displayName: "ChatGPT plan", snapshot: { state: "unavailable" },
+      install: { docsUrl: "https://example.test", server: { package: "@openai/codex" } }, authentication: { method: "browser-pkce" }, models: { default: "m", options: [] } } as InstanceInfo;
+    const claudeToInstall = { ...claude(false), install: { docsUrl: "https://example.test", server: { package: "@anthropic-ai/claude-code" } } } as InstanceInfo;
+    f.state = { ...f.state, instances: [claudeToInstall, plan, { ...plan, instanceId: "codex", install: { docsUrl: "https://example.test" } }] };
+    await show();
+    expect([...host.querySelectorAll("[data-first-ais] button")].map((node) => node.textContent)).toEqual(["Install Claude", "Set up ChatGPT"]);
+    await press("Set up ChatGPT");
+    expect(f.api).toHaveBeenCalledWith("/api/instances/chatgpt/install", { method: "POST" });
+    // Without an install the app can run, it opens the dialog under the same label.
+    f.state = { ...f.state, instances: [claudeToInstall, { ...plan, install: { docsUrl: "https://example.test" } }] };
+    await show();
+    await press("Set up ChatGPT");
+    expect(host.querySelector("[data-connect-ai]")).not.toBeNull();
+  });
+
+  it("installs OpenCode from its pill and counts its free model once it answered, since the person picked it", async () => {
+    f.state = { ...f.state, instances: [signIn(), notInstalledOpenCode] };
+    await show();
+    await press("Install OpenCode");
+    expect(f.api).toHaveBeenCalledWith("/api/instances/opencodeGo/install", { method: "POST" });
+    // Installed, still listing its models: its pill waits.
+    f.state = { ...f.state, instances: [signIn(), { ...freeOpenCode, snapshot: { state: "available", authenticated: true }, models: { default: "", options: [] }, aiTest: undefined }] };
+    await show();
+    expect(button("Waiting for OpenCode…")).toBeDefined();
+    expect(button("Next")).toBeUndefined();
+    expect(f.checks).toEqual([]);
+    f.state = { ...f.state, instances: [signIn(), { ...freeOpenCode, aiTest: undefined }] };
+    await show();
+    await act(async () => {});
+    expect(f.checks).toEqual(["/api/instances/opencodeGo/check"]);
+    expect(text()).toContain("Connected to OpenCode");
+    expect(button("Next")!.disabled).toBe(false);
+  });
+
+  it("uses an OpenCode that already works once its pill is pressed, and not before", async () => {
+    f.state = { ...f.state, instances: [freeOpenCode, claude(false)] };
+    await show();
+    expect(button("Next")).toBeUndefined();
+    await press("Connect OpenCode");
+    await act(async () => {});
+    expect(text()).toContain("Connected to OpenCode");
+    expect(button("Next")!.disabled).toBe(false);
   });
 
   it("opens every other way in the Connect an AI dialog, where OpenCode's free model is only a backup", async () => {
@@ -220,7 +259,7 @@ describe("with no AI working yet", () => {
     expect(dialog.querySelector('[data-engine-setup="claude"]')).not.toBeNull();
     await act(async () => { dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
     expect(host.querySelector("[data-connect-ai]")).toBeNull();
-    expect(text(), "Escape closed the dialog only").toContain("Meet OpenMausBot");
+    expect(text(), "Escape closed the dialog only").toContain("Meet MausBot");
   });
 
   it("says why an AI didn't answer its test, under the pill and in the dialog with Check again", async () => {
@@ -261,7 +300,7 @@ describe("with no AI working yet", () => {
     await show();
     await key("Enter");
     expect(host.querySelector("[data-connect-ai]"), "Enter pressed Connect Claude").not.toBeNull();
-    expect(text()).toContain("Meet OpenMausBot");
+    expect(text()).toContain("Meet MausBot");
     await act(async () => { host.querySelector("[data-connect-ai]")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
     await key("Escape");
     await tick(100);
@@ -272,7 +311,7 @@ describe("with no AI working yet", () => {
 describe("other first runs", () => {
   it("gives a hosted place's admin the first screen only, then the chat", async () => {
     await show({ hosted: true });
-    expect(text()).toContain("This is your team's shared OpenMausBot");
+    expect(text()).toContain("This is your team's shared MausBot");
     await press("Next");
     expect(text()).not.toContain("Introducing your Chief of Staff");
     expect(f.onDone).toHaveBeenCalledExactlyOnceWith(null);

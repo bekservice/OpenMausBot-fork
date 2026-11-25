@@ -2,9 +2,10 @@
 // packaged app ships no node_modules. Entry points keep their exact relative
 // paths under dist-server, where the server locates each proxy by path.
 import { build } from "esbuild";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { serverLocalePlugin } from "./server-locale-plugin.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const server = join(root, "server");
@@ -31,12 +32,17 @@ const NODE_REQUIRE = {
 const ENTRY_POINTS = [
   "index.ts",
   "message-search.worker.ts",
+  "text-changes.worker.ts",
   // the `openmausbot` command
   "openmausbot.ts",
   "pair-cli.ts",
   "workspace-backup.worker.ts",
+  // the stall watch's thread (perf/stall-watch.ts)
+  "stall-watch.worker.ts",
   // the OMB Cloud Pro home image's entry point
   "cloud-home-start.ts",
+  // a Cloud server's backup runs it in the home before it packs the volume (cloud-backup-stage.ts)
+  "cloud-backup-db-snapshot.ts",
   // the container image's entry point
   "server-launcher.ts",
   // Imported directly by the packaged smoke probes. An explicit root sibling,
@@ -56,10 +62,13 @@ const ENTRY_POINTS = [
   "drivers/agents-proxy.ts",
   "drivers/dweb-proxy.ts",
   "drivers/phone-proxy.ts",
+  "drivers/chatgpt-plan-token-command.ts",
   // the bot box (server/bot-box): the in-box bridge, the probe the self-check runs inside a box, and the check by hand
   "bot-box/box-bridge.ts",
   "bot-box/box-probe.ts",
   "bot-box/box-check.ts",
+  // the meeting bot, copied to a cloud computer and run there with its own Node
+  "meetings/meetbot.ts",
 ];
 
 await build({
@@ -70,10 +79,14 @@ await build({
   format: "esm",
   outbase: server,
   outdir: join(root, "dist-server"),
+  // Function names stay in stack traces. Node prints a whole source line with an uncaught error, so no line may be long.
+  minifyWhitespace: true,
+  minifySyntax: true,
+  lineLimit: 500,
   // Written after tsc, replacing its output for these entry points.
   allowOverwrite: true,
   logLevel: "info",
-  plugins: [yamlEsmPlugin],
+  plugins: [yamlEsmPlugin, serverLocalePlugin],
   banner: NODE_REQUIRE,
 });
 
@@ -88,6 +101,7 @@ await build({
   outfile: join(root, "dist-server", "mcp-server.js"),
   allowOverwrite: true,
   logLevel: "info",
+  plugins: [serverLocalePlugin],
 });
 
 // `openmausbot serve --tunnel` spawns the connector guardian as its own
@@ -129,11 +143,12 @@ if (existsSync(join(root, "enterprise", "server", "index.ts"))) {
     outfile: join(root, "dist-server", "enterprise", "server", "index.js"),
     allowOverwrite: true,
     logLevel: "info",
+    plugins: [serverLocalePlugin],
   });
   copyFileSync(join(root, "enterprise", "LICENSE"), join(root, "dist-server", "enterprise", "LICENSE"));
 }
 
-// The packaged desktop forks this bootstrap to turn on Node's compile cache.
+// The packaged desktop and the container launcher run this bootstrap to turn on Node's compile cache.
 // Copied, not bundled: esbuild would inline index.js into it.
 copyFileSync(join(root, "scripts", "desktop-server-entry.mjs"), join(root, "dist-server", "desktop-entry.mjs"));
 
@@ -159,3 +174,7 @@ await build({ entryPoints: [piMcpExtSrc], outfile: piMcpExtDest, bundle: true,
 // package.json, and the server reports this one (server/environment.ts).
 const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 writeFileSync(join(root, "dist-server", "package.json"), `${JSON.stringify({ type: "module", version })}\n`);
+
+// tsc copies the language packs server/server-lines.ts imports (13 MB) beside its own output. The bundles above carry
+// the server's keys, so nothing reads the copies.
+rmSync(join(root, "dist-server", "src", "locales"), { recursive: true, force: true });

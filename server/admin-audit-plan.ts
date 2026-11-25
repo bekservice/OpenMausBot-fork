@@ -22,12 +22,12 @@ export function adminAuditPlan(method: string, path: string, sharedComputers: bo
   if (path.startsWith("/api/internal/") || path.startsWith("/api/testing/")) return null;
   const plan: AuditPlan = {
     config: requiredScope(method, path, { sharedComputers }) === "admin",
-    createsBots: method === "POST" && (path === "/api/bots" || path === "/api/teams/import" || path === "/api/org-library/add"),
+    createsBots: method === "POST" && (path === "/api/bots" || path === "/api/teams/import" || path === "/api/share/import" || path === "/api/org-library/add"),
     createsWebhook: method === "POST" && path === "/api/webhooks",
     pairing: method === "POST" && path === "/api/auth/pairing",
   };
-  let m = /^\/api\/bots\/([\w-]+)(?:\/(always-allow|model))?$/.exec(path);
-  if (m && ((!m[2] && method === "PATCH") || (m[2] === "model" && method === "PATCH") || (m[2] === "always-allow" && method === "POST"))) plan.botId = m[1];
+  let m = /^\/api\/bots\/([\w-]+)(?:\/(always-allow|model|profile))?$/.exec(path);
+  if (m && method === (m[2] === "always-allow" ? "POST" : "PATCH")) plan.botId = m[1];
   if (m && !m[2] && method === "DELETE") plan.deletesBot = m[1];
   m = /^\/api\/webhooks\/([\w-]+)(\/rotate)?$/.exec(path);
   if (m && ((m[2] && method === "POST") || (!m[2] && (method === "PATCH" || method === "DELETE")))) plan.webhookId = m[1];

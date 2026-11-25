@@ -41,11 +41,12 @@ const CLOUD = { name: "Studio Cloud", origin: "https://omb-u-1a2b3c4d5e6f.fly.de
 const quiet: CloudSendNotice = { ready: true, bots: [], updatedBots: [], skills: 0, logins: 0, onePassword: false, settings: 0, signature: "", dismissed: false, running: false, last: null, whole: null };
 const claude = { instanceId: "claude", driverKind: "claudeAgent", displayName: "Claude", access: "subscription", authentication: { method: "paste-code" }, snapshot: { state: "available", authenticated: false }, models: { default: "", options: [] } };
 const codex = { ...claude, instanceId: "codex", driverKind: "codex", displayName: "Codex" };
+const openCode = { instanceId: "opencodeGo", driverKind: "opencodeGo", displayName: "OpenCode", access: "subscription",
+  install: { server: { standalone: { version: "1", downloadBytes: 1 } } }, snapshot: { state: "unavailable" }, models: { default: "", options: [] } };
 const credit = { instanceId: "trial", driverKind: "openai-compat", displayName: "Trial credit · Claude", readOnly: true, trialCredit: "active", snapshot: { state: "available" }, models: { default: "", options: [] } };
 
 let host: HTMLDivElement;
 let root: Root;
-let lending: { open: ReturnType<typeof vi.fn> };
 const welcome = { current: null as ReturnType<typeof useCloudWelcome> | null };
 function Probe() { welcome.current = useCloudWelcome(); return null; }
 const render = () => flushSync(() => root.render([createElement(CloudWelcome, { key: "welcome" }), createElement(Probe, { key: "probe" })]));
@@ -83,9 +84,8 @@ beforeEach(() => {
     if (patch.onboarding) return { ...fixture.state.config, onboarding: { ...fixture.state.config.onboarding, ...patch.onboarding } };
     throw new Error(`unexpected ${path}`);
   });
-  lending = { open: vi.fn().mockResolvedValue(undefined) };
   window.ogb = {
-    platform: "darwin", cloudLending: lending,
+    platform: "darwin", cloudPlan: { state: vi.fn() },
     cloudSendPage: { notice: vi.fn().mockResolvedValue(quiet), dismiss: vi.fn(), onNotice: vi.fn(() => () => {}) },
     workspaces: { state: vi.fn().mockResolvedValue({ local: false, name: "Studio Cloud", origin: CLOUD.origin }), menu: vi.fn() },
   } as unknown as typeof window.ogb;
@@ -100,19 +100,55 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("CloudWelcome on a Team Cloud", () => {
+  const OWN = { id: "mine", threadId: "tm", name: "MausBot", defaultBot: { person: "nuno@acme.test" } };
+  const FIRST = { id: "b2", threadId: "t2", name: "Poppy", chiefOfStaff: true };
+  beforeEach(() => { fixture.state.config.team = { id: "team-acme", name: "Acme" }; fixture.state.bots = [OWN, FIRST]; });
+
+  it("an empty team isn't told its bots are already here: the Owner's own MausBot and the first bot are no work", async () => {
+    render();
+    await vi.waitFor(() => expect(host.querySelector('[data-bring-choice="fresh"]')).not.toBeNull());
+    expect(text()).not.toContain("Your bots are already here");
+    expect(host.querySelector("[data-bring-here]")).toBeNull();
+  });
+
+  it("a team with a second bot of its own says so, as before", async () => {
+    fixture.state.bots = [OWN, FIRST, { id: "b3", threadId: "t3", name: "Quotes" }];
+    render();
+    await vi.waitFor(() => expect(host.querySelector("[data-bring-here]")).not.toBeNull());
+  });
+
+  it("the finished list names the first bot, never a Chief of Staff, and is recorded as done the moment it shows", async () => {
+    fixture.state.config.onboarding.hintsSeen = ["cloud-welcome-shown", "cloud-welcome-bring", "cloud-welcome-engine", "cloud-welcome-files"];
+    render();
+    await vi.waitFor(() => expect(text()).toContain("Say hi to Poppy"));
+    expect(text()).not.toContain("Chief of Staff");
+    const saved = fixture.api.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)).onboarding?.hintsSeen ?? []);
+    expect(saved.some((hints: string[]) => hints.includes("cloud-welcome-done"))).toBe(true);
+  });
+});
+
 describe("CloudWelcome", () => {
+  it("on My Cloud the finished list still greets the Chief of Staff and stays until the person ends it", async () => {
+    fixture.state.config.onboarding.hintsSeen = ["cloud-welcome-shown", "cloud-welcome-bring", "cloud-welcome-engine", "cloud-welcome-files"];
+    render();
+    await vi.waitFor(() => expect(text()).toContain("Say hi to your Chief of Staff"));
+    const saved = fixture.api.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)).onboarding?.hintsSeen ?? []);
+    expect(saved.some((hints: string[]) => hints.includes("cloud-welcome-done"))).toBe(false);
+  });
+
   it("opens on bringing this computer's stuff, before any chat: a fresh start, with nothing to copy by hand", async () => {
     fixture.state.bots = [fixture.state.bots[0]];
     render();
     await vi.waitFor(() => expect(text()).toContain("What should Studio Cloud start with?"));
     expect(text()).toContain("Welcome to Studio Cloud");
-    expect(text()).toContain("Bots on your computer come here by themselves from the OpenMausBot app.");
+    expect(text()).toContain("Bots on your computer come here by themselves from the MausBot app.");
     expect(host.querySelector('[data-bring-choice="fresh"]')).not.toBeNull();
     expect(host.querySelector("[data-bring-desktop]"), "this is the desktop app already").toBeNull();
     expect(host.querySelector("[data-bring-update]")).toBeNull();
     expect(host.querySelector('[aria-current="step"]')!.getAttribute("data-welcome-rail")).toBe("bring");
     expect([...document.body.querySelectorAll("button")].map((node) => node.textContent?.trim())).toEqual([
-      "1Bring your stuffYour bots and chats (Not done yet)", "2Connect your AIClaude or ChatGPT (Not done yet)", "3Files and appsOptional (Not done yet)",
+      "1Bring your stuffYour bots and chats (Not done yet)", "2Connect your AIClaude, ChatGPT or OpenCode (Not done yet)", "3Files and appsOptional (Not done yet)",
       "Skip setup", "Continue",
     ]);
     expect(sent()).toEqual([]);
@@ -123,7 +159,7 @@ describe("CloudWelcome", () => {
     fixture.state.bots = [fixture.state.bots[0]];
     window.ogb = { ...window.ogb!, cloudMove: {} } as unknown as typeof window.ogb;
     render();
-    await vi.waitFor(() => expect(host.querySelector("[data-bring-update]")?.textContent).toBe("Update OpenMausBot to bring your bots here by itself."));
+    await vi.waitFor(() => expect(host.querySelector("[data-bring-update]")?.textContent).toBe("Update MausBot to bring your bots here by itself."));
     expect([...host.querySelectorAll("button")].some((node) => node.textContent?.startsWith("Copy"))).toBe(false);
   });
 
@@ -165,7 +201,7 @@ describe("CloudWelcome", () => {
     render();
     await vi.waitFor(() => expect(button("Choose a team")).toBeDefined());
     click("Choose a team");
-    expect(host.querySelector("[data-team-library]")).not.toBeNull();
+    await vi.waitFor(() => expect(host.querySelector("[data-team-library]")).not.toBeNull());
     flushSync(() => fixture.imported!());
     expect(hintsPut().at(-1)).toEqual([SHOWN, welcomeStepHint("bring")]);
     expect(host.querySelector('[data-welcome-step="engine"]')).not.toBeNull();
@@ -229,20 +265,31 @@ describe("CloudWelcome", () => {
     expect(hintsPut().at(-1)).toEqual(expect.arrayContaining([welcomeStepHint("engine")]));
   });
 
-  it("with no AI working, leads with the Claude sign-in and folds the other ways under it", () => {
+  it("with no AI working, leads with the Claude, ChatGPT and OpenCode setups and folds the other ways under them", () => {
     fixture.state.config.onboarding = { ...EMPTY_ONBOARDING, hintsSeen: [welcomeStepHint("bring")] };
+    // The Cloud refuses the ChatGPT plan's own sign-in: ChatGPT is Codex's.
+    const plan = { ...codex, instanceId: "chatgpt", displayName: "ChatGPT plan", authentication: { method: "browser-pkce" },
+      snapshot: { state: "unavailable", authenticated: false, chatgptPlan: true, authenticationUnavailableReason: "Not on a Cloud." } };
+    fixture.state.instances = [claude, codex, plan, openCode];
     render();
     expect(host.querySelector('[data-welcome-step="engine"]')).not.toBeNull();
+    expect(text()).toContain("Your bots think with your own Claude or ChatGPT plan, or with OpenCode. Set one up once on My Cloud.");
+    expect([...host.querySelectorAll("[data-welcome-recommended]")].map((node) => node.getAttribute("data-welcome-recommended"))).toEqual(["claude", "codex", "opencodeGo"]);
+    const plain = (name: string) => `Use the ${name} account you already have. You sign in on their own website, so your password stays with them.`;
     expect(host.querySelector('[data-welcome-recommended="claude"] [data-engine-setup="claude"]')?.getAttribute("data-description"), "one plain line, not the setup's own")
-      .toBe("Use the Claude account you already have. You sign in on their own website, so your password stays with them.");
+      .toBe(plain("Claude"));
+    expect(host.querySelector('[data-welcome-recommended="codex"] [data-engine-setup="codex"]')?.getAttribute("data-description")).toBe(plain("ChatGPT"));
+    expect(host.querySelector('[data-welcome-recommended="opencodeGo"] [data-engine-setup="opencodeGo"]')?.hasAttribute("data-description"), "OpenCode installs with nothing to sign in to")
+      .toBe(false);
     expect(host.querySelector("[data-cloud-choice]")).toBeNull();
     fixture.state.instances = [{ ...claude, authentication: undefined }, codex];
     render();
     expect(host.querySelector('[data-welcome-recommended="claude"] [data-engine-setup="claude"]')?.hasAttribute("data-description"), "a sign-in finished in Terminal keeps its own instructions")
       .toBe(false);
     click("Other ways");
-    expect(host.querySelector('[data-cloud-choice="codex"]')).not.toBeNull();
-    expect(host.querySelector('[data-cloud-choice="claude"]'), "the recommended way is not offered twice").toBeNull();
+    expect(host.querySelector('[data-cloud-choice="codex"]'), "ChatGPT is not offered twice").toBeNull();
+    expect(host.querySelector('[data-cloud-choice="claude"]'), "Claude is not offered twice").toBeNull();
+    expect(host.querySelector('[role="group"][aria-label]'), "no empty row of tiles").toBeNull();
     expect(host.querySelector('[data-cloud-choice="api-key"]')).not.toBeNull();
     click("Skip for now");
     expect(host.querySelector('[data-welcome-step="files"]')).not.toBeNull();
@@ -280,24 +327,57 @@ describe("CloudWelcome", () => {
     expect(checks).toEqual(["claude", "codex", "codex"]);
   });
 
-  it("on My Cloud once it is home, the folders card names no other app on this computer: My Cloud's own Settings say what is shared", async () => {
+  it("checks OpenCode with one tiny real message once it is installed here, and Continue moves on", async () => {
+    fixture.state.config.onboarding = { ...EMPTY_ONBOARDING, hintsSeen: [welcomeStepHint("bring")] };
+    fixture.state.instances = [claude, codex, openCode];
+    const checks: string[] = [];
+    const config = fixture.api.getMockImplementation()!;
+    fixture.api.mockImplementation(async (path: string, init?: RequestInit) => {
+      const check = /^\/api\/instances\/([\w.-]+)\/check$/.exec(path);
+      if (!check) return config(path, init);
+      checks.push(check[1]!);
+      return { ok: true };
+    });
+    render();
+    fixture.state = { ...fixture.state, instances: [claude, codex, { ...openCode, snapshot: { state: "available", authenticated: true, freeFallback: true } }] };
+    render();
+    await vi.waitFor(() => expect(text()).toContain("OpenCode is working"));
+    expect(checks).toEqual(["opencodeGo"]);
+    click("Continue");
+    expect(host.querySelector('[data-welcome-step="files"]')).not.toBeNull();
+  });
+
+  it("in the app on a Cloud of the person's own, the folders card says this computer's files are used by themselves, with nothing to press", async () => {
     fixture.state.config.onboarding = { ...EMPTY_ONBOARDING, hintsSeen: [welcomeStepHint("bring"), welcomeStepHint("engine")] };
     fixture.plan = { status: "paid", tier: "pro", home: true };
     render();
     await vi.waitFor(() => expect(text()).toContain("Welcome to Studio Cloud"));
-    const folders = host.querySelector('[data-welcome-files="folders"]')?.textContent ?? "";
-    expect(folders).toContain("Bots on Studio Cloud can read the folders your computer shares, while it's on. See what it shares in Settings.");
-    expect(folders).not.toMatch(/this computer/iu);
-    click("Open Settings");
-    expect(lending.open).toHaveBeenCalledOnce();
+    const folders = host.querySelector('[data-welcome-files="folders"]')!;
+    expect(folders.textContent).toContain("Bots on Studio Cloud use the files on this computer by themselves while it's awake and MausBot is open. There's nothing to set up.");
+    expect(folders.querySelector("button")).toBeNull();
   });
 
-  it("files and apps open this computer's Files and Connected apps, then it is ready and says hi to the Chief of Staff", async () => {
+  it("from a browser, or on a Team Cloud, the folders card says the desktop app shares folders through Files", async () => {
+    fixture.state.config.onboarding = { ...EMPTY_ONBOARDING, hintsSeen: [welcomeStepHint("bring"), welcomeStepHint("engine")] };
+    const desktopText = "Bots on Studio Cloud can read folders you share from your computer, even when it's off. Share them from the desktop app, under Files.";
+    delete (window.ogb as Record<string, unknown>).cloudPlan;
+    render();
+    await vi.waitFor(() => expect(text()).toContain("Welcome to Studio Cloud"));
+    expect(host.querySelector('[data-welcome-files="folders"]')?.textContent).toContain(desktopText);
+    flushSync(() => root.unmount());
+    root = createRoot(host);
+    (window.ogb as Record<string, unknown>).cloudPlan = { state: vi.fn() };
+    fixture.state.config.team = { id: "t-acme", name: "Acme" };
+    render();
+    // On a team the welcome is the team's, by its name: never "My Cloud" or the Cloud's address.
+    await vi.waitFor(() => expect(text()).toContain("Welcome to Acme"));
+    expect(host.querySelector('[data-welcome-files="folders"]')?.textContent).toContain(desktopText.replace("Studio Cloud", "Acme"));
+  });
+
+  it("files and apps open Connected apps, then it is ready and says hi to the Chief of Staff", async () => {
     fixture.state.config.onboarding = { ...EMPTY_ONBOARDING, hintsSeen: [welcomeStepHint("bring"), welcomeStepHint("engine")] };
     render();
     await vi.waitFor(() => expect(text()).toContain("Welcome to Studio Cloud"));
-    click("Open on this computer");
-    expect(lending.open).toHaveBeenCalledOnce();
     click("Connect apps");
     expect(fixture.dispatch).toHaveBeenCalledWith({ type: "togglePlugins", open: true, surface: "apps" });
     click("Finish");
@@ -465,5 +545,20 @@ describe("CloudWelcome", () => {
         expect(host.querySelector('[data-welcome-step="bring"]')).not.toBeNull();
       } finally { vi.useRealTimers(); }
     });
+  });
+});
+
+describe("the last step on a new Team Cloud", () => {
+  it("sends its Owner to the invite box on the team's People page, saying a 2-person team has room for one more", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { WelcomeDone } = await import("./WelcomeSteps");
+    const invite = "https://cloud.example.test/cloud/team/team-acme/people?do=invite";
+    const done = (link: string | null) => renderToStaticMarkup(createElement(WelcomeDone, {
+      name: "Acme", bot: null, team: true, headingRef: null, onSayHi: () => {}, onJob: () => {}, invite: link }));
+    const html = done(invite);
+    expect(html).toContain(`href="${invite}"`);
+    expect(html).toContain("A 2-person team includes one more person besides you");
+    expect(html).not.toMatch(/up to \d|\$\d/);
+    expect(done(null)).not.toContain("data-welcome-invite");
   });
 });

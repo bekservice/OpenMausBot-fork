@@ -6,16 +6,19 @@ import type { CloudColor } from "../../electron/cloud-buy.mjs";
 import type { CloudAccountState, CloudCheckoutOutcome } from "../../electron/cloud-account.mjs";
 import type { CloudOffer } from "../../electron/cloud-home.mjs";
 import { track } from "@/lib/analytics";
+import { cloudAccountBridge } from "@/lib/cloud-add-web";
 import { cn } from "@/lib/cn";
 import { cloudColor, cloudNameShown, DEFAULT_CLOUD_COLOR } from "@/lib/cloud-look";
-import { cloudAddView, offerPlan, sameTerms, startedSleeps, type CloudAddView, type CloudSignInPhase } from "@/lib/cloud-plan";
+import { blockedProblem, cloudAddView, offerPlan, sameTerms, startedSleeps, type CloudAddView, type CloudSignInPhase } from "@/lib/cloud-plan";
 import { t } from "@/lib/i18n";
 import { welcomeOnScreen } from "@/lib/onboarding";
+import { hasBotsHere } from "@/lib/move-changes";
 import { useStore } from "@/state/store";
+import { AddCloudFlow } from "./cloud-buy/AddCloudFlow";
 import { ChooseScreen } from "./cloud-buy/ChooseScreen";
 import { OneCloudScreen, StatusScreen } from "./cloud-buy/OneCloudScreen";
 import { PayScreen } from "./cloud-buy/PayScreen";
-import { StagingMark } from "./cloud-buy/parts";
+import { CLOSE, ON_NIGHT, SHEET, StagingMark } from "./cloud-buy/parts";
 import { SetupScreen, TeamReadyScreen, TeamSetupScreen } from "./cloud-buy/SetupScreen";
 import { BrowserSignInScreen, codeDigits, SignInScreen } from "./cloud-buy/SignInScreen";
 
@@ -26,6 +29,10 @@ export interface CloudAddActions {
   back(): void;
   email(value: string): void;
   sendCode(): void;
+  /** Clears a saved sign-in this computer can't read, then sends the code. */
+  resetSaved(): void;
+  /** Ends the sign-in under way in the browser, then sends the code. */
+  cancelBrowser(): void;
   changeEmail(): void;
   code(value: string): void;
   resend(): void;
@@ -51,6 +58,8 @@ export interface CloudAddActions {
  * `current` is the tier of the plan this account already has, from its verified entitlement. */
 export interface CloudAddUi {
   chosen: string | null; current: string | null; offerShown: CloudOffer | null; now: number; busy: boolean; openFailed: boolean;
+  /** This computer's page, with bots of its own: the offer says a bot lives in one place. */
+  botsHere?: boolean;
   email: string; code: string; profileEmail: string | null;
   look: { typed: string; name: string; color: CloudColor };
   counting: number | null; copied: boolean; payFailed: boolean; interest: "sent" | "failed" | null;
@@ -62,13 +71,13 @@ export function CloudAddPanel({ view, ui, actions }: { view: CloudAddView; ui: C
     case "unreachable": return <StatusScreen kind="unreachable" line={t("cloudAdd.unreachable")} onRetry={actions.retry} onClose={actions.close} />;
     case "error": return <StatusScreen kind={`error-${view.reason}`} line={t(view.reason === "rate-limited" ? "cloudAdd.rateLimited" : "cloudAdd.failed")}
       onRetry={actions.retry} onClose={actions.close} />;
-    case "offer": return <ChooseScreen offer={view.offer} current={ui.current} now={ui.now} busy={ui.busy} signedOut={view.signedOut}
+    case "offer": return <ChooseScreen offer={view.offer} current={ui.current} now={ui.now} busy={ui.busy} signedOut={view.signedOut} botsHere={ui.botsHere === true}
       notice={view.notice ? t(view.notice === "code-expired" ? "cloudAdd.codeExpired" : view.notice === "signin-ended" ? "cloudAdd.signInEnded"
         : view.notice === "terms" ? "cloudBuy.termsChanged" : "cloudAdd.preparing") : null}
       onStart={actions.start} onSignIn={actions.signIn} />;
     case "sign-in": return <SignInScreen phase={view.phase} email={ui.email} code={ui.code} profileEmail={ui.profileEmail} busy={ui.busy} now={ui.now}
       onBack={actions.back} onEmail={actions.email} onSend={actions.sendCode} onChangeEmail={actions.changeEmail} onCode={actions.code}
-      onResend={actions.resend} onBrowser={actions.browser} />;
+      onResend={actions.resend} onBrowser={actions.browser} onReset={actions.resetSaved} onCancelBrowser={actions.cancelBrowser} />;
     case "signing-in": return <BrowserSignInScreen code={view.code} checkout={view.checkout} busy={ui.busy}
       trial={ui.offerShown ? Boolean(offerPlan(ui.offerShown, ui.chosen).trialDays) : false} onReopen={actions.reopenBrowser} onCancel={actions.cancelSignIn} />;
     case "waiting": return <PayScreen plan={view.plan} offer={ui.offerShown} browser={view.browser} late={view.late} link={view.link} email={view.email}
@@ -84,18 +93,18 @@ export function CloudAddPanel({ view, ui, actions }: { view: CloudAddView; ui: C
   }
 }
 
-const WIDTH: Partial<Record<CloudAddView["kind"], string>> = { offer: "max-w-[900px]", starting: "max-w-[720px]", ready: "max-w-[720px]" };
+const WIDTH: Partial<Record<CloudAddView["kind"], string>> = { offer: "max-w-[920px]", starting: "max-w-[720px]", ready: "max-w-[720px]" };
 /** Mid sign-in, checkout or setup a stray click beside the sheet (say, back from paying in the browser) must not lose it: there only Close and Esc do. */
 const HELD: ReadonlySet<CloudAddView["kind"]> = new Set(["sign-in", "signing-in", "waiting", "starting", "team-starting"]);
 
 /** The sheet over the app: one width per screen, the close button, and the staging mark when the app is on staging.
  * Above the z-50 layers (Settings, the welcome flow), which it may be opened over. */
 export function CloudAddSheet({ kind, staging, onClose, children }: { kind: CloudAddView["kind"]; staging: boolean; onClose: () => void; children: ReactNode }) {
-  return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 sm:p-6" onMouseDown={event => event.target === event.currentTarget && !HELD.has(kind) && onClose()}>
+  return <div className="ui-scrim fixed inset-0 z-[60] flex items-center justify-center p-4 sm:p-6" onMouseDown={event => event.target === event.currentTarget && !HELD.has(kind) && onClose()}>
     <div role="dialog" aria-modal="true" aria-labelledby="cloud-add-title" data-cloud-add-dialog tabIndex={-1}
-      className={cn("animate-pop-in relative max-h-full w-full overflow-y-auto overscroll-contain rounded-2xl border border-hairline/70 bg-panel shadow-2xl outline-none", WIDTH[kind] ?? "max-w-[540px]")}>
-      <button type="button" onClick={onClose} aria-label={t("cloudAdd.close")} className="ui-icon-button absolute end-3.5 top-3.5 z-10"><X size={18} /></button>
-      {staging && <StagingMark className="absolute end-14 top-[19px] z-10" />}
+      className={cn(SHEET, "group/sheet animate-pop-in relative max-h-full w-full overflow-y-auto overscroll-contain outline-none", WIDTH[kind] ?? "max-w-[540px]")}>
+      <button type="button" onClick={onClose} aria-label={t("cloudAdd.close")} className={cn(CLOSE, ON_NIGHT, "absolute end-4 top-4 z-10")}><X size={16} /></button>
+      {staging && <StagingMark className="absolute end-14 top-[22px] z-10 group-has-[[data-night-card]]/sheet:bg-app" />}
       {children}
     </div>
   </div>;
@@ -111,7 +120,7 @@ type Note = "copied" | "pay-failed" | "interest-sent" | "interest-failed" | null
 export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
   const { state, dispatch } = useStore();
   const request = state.cloudAdd;
-  const bridge = window.ogb?.remoteClient?.active ? undefined : window.ogb?.cloudAccount;
+  const bridge = cloudAccountBridge();
   const [account, setAccount] = useState<CloudAccountState | null>(null);
   const [offer, setOffer] = useState<CloudOffer | null | undefined>(undefined);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -130,6 +139,7 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
   const [, setTick] = useState(0);
   const [arrived, setArrived] = useState(false);
   const [terms, setTerms] = useState(false);
+  const [extraWide, setExtraWide] = useState(false);
   const open = Boolean(request && bridge);
   const profileEmail = state.config?.profile?.email?.trim() || null;
   // Over the welcome flow the sheet is as good as closed for "ready": main notifies, and nothing switches the window away.
@@ -263,6 +273,12 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
     return () => window.removeEventListener("blur", stop);
   }, [counting]);
   if (!open || !view || !request || !bridge || view.kind === "settings") return null;
+  if (view.kind === "has-cloud" && account?.status === "connected" && account.clouds && window.ogb?.cloudAdd
+    && (account.addCloud?.canAdd !== false || (account.adding && !account.adding.done))) {
+    return <CloudAddSheet kind={extraWide ? "offer" : "has-cloud"} staging={account.staging === true} onClose={close}>
+      <AddCloudFlow onClose={close} onFirstCloud={() => {}} onWide={setExtraWide} source={request.source} />
+    </CloudAddSheet>;
+  }
 
   const offerShown = offer ?? null;
   const planNow = () => view.kind === "waiting" && !chosen ? view.plan : offerShown ? offerPlan(offerShown, chosen).tier : null;
@@ -283,19 +299,21 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
     setSignIn({ step: "email", intent, problem: null });
     setForm({ email: form.email || profileEmail || "", code: "" });
   };
-  const sendCode = () => {
+  /** `before`: what clears the way first (a saved sign-in cleared, the browser's ended), as one step with the send. */
+  const send = (before: () => Promise<unknown> = async () => {}) => {
     if (busy || !bridge.signInStart || !signIn || signIn.step === "done") return;
     const phase = signIn;
     setBusy(true);
-    void bridge.signInStart(form.email).then(result => {
+    void before().then(() => bridge.signInStart!(form.email)).then(result => {
       if (result.outcome === "sent") {
         setSignIn({ step: "code", intent: phase.intent, email: result.email, resendAt: result.resendAt, problem: null, triesLeft: null,
           ...(result.signupOpen === false ? { signupOpen: false } : {}) });
         setForm({ email: result.email, code: "" });
         track("cloud_signin", { step: "code_sent", source: request.source });
-      } else setSignIn({ ...phase, problem: result.outcome });
+      } else setSignIn({ ...phase, problem: result.outcome === "blocked" ? blockedProblem(result) : result.outcome });
     }, () => setSignIn({ ...phase, problem: "failed" })).finally(() => setBusy(false));
   };
+  const sendCode = () => send();
   const verify = (code: string) => {
     if (!bridge.signInVerify || signIn?.step !== "code") return;
     const phase = signIn, plan = phase.intent ? planNow() : null;
@@ -305,7 +323,7 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
         const result = await bridge.signInVerify!(code);
         if (result.outcome !== "signed-in") {
           setForm({ email: form.email, code: "" });
-          setSignIn({ ...phase, problem: result.outcome, triesLeft: result.outcome === "wrong-code" ? result.triesLeft : null });
+          setSignIn({ ...phase, problem: result.outcome === "blocked" ? blockedProblem(result) : result.outcome, triesLeft: result.outcome === "wrong-code" ? result.triesLeft : null });
           return;
         }
         setAccount(result.state); setArrived(true);
@@ -330,6 +348,8 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
     back: () => { setSignIn(null); void bridge.signInCancel?.().catch(() => {}); },
     email: value => setForm({ email: value, code: form.code }),
     sendCode,
+    resetSaved: () => { if (bridge.resetSaved) send(async () => setAccount(await bridge.resetSaved!())); },
+    cancelBrowser: () => send(async () => setAccount(await bridge.cancel())),
     changeEmail: () => { if (signIn) { setSignIn({ step: "email", intent: signIn.intent, problem: null }); void bridge.signInCancel?.().catch(() => {}); } },
     code: value => {
       const digits = codeDigits(value);
@@ -368,7 +388,8 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
     },
     close,
   };
-  const ui: CloudAddUi = { chosen, current: currentTier(account), offerShown, now: now(), busy, openFailed, email: form.email, code: form.code, profileEmail, look: shownLook,
+  const ui: CloudAddUi = { chosen, current: currentTier(account), offerShown, now: now(), busy, openFailed,
+    botsHere: hasBotsHere({ bots: state.bots, cloudHome: state.config?.cloudHome === true, desktop: Boolean(window.ogb), remote: window.ogb?.remoteClient?.active === true }), email: form.email, code: form.code, profileEmail, look: shownLook,
     counting: typeof auto === "number" ? auto : null, copied: note === "copied", payFailed: note === "pay-failed",
     interest: note === "interest-sent" ? "sent" : note === "interest-failed" ? "failed" : null };
   return <CloudAddSheet kind={view.kind} staging={account?.staging === true} onClose={close}><CloudAddPanel view={view} ui={ui} actions={actions} /></CloudAddSheet>;

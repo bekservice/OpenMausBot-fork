@@ -21,10 +21,12 @@ export function defaultBotRefusal(name: string): string {
   return `${name} can't be deleted or archived. To take it off the sidebar, choose Hide in its menu, or turn off "Show ${name} in the sidebar" in Settings → General.`;
 }
 
-/** Why a PATCH may not change this bot so, or null. */
+/** Why a PATCH may not change this bot so, or null. `defaultBot: null` demotes the bot to a regular one and is always
+ * allowed on a default bot; any other `defaultBot` value is refused — the flag is set at creation, never by PATCH. */
 export function defaultBotPatchRefusal(bot: BotRecord | null, body: Record<string, unknown>): string | null {
   for (const key of ["sidebarHidden", "welcomed"]) if (body[key] !== undefined && typeof body[key] !== "boolean") return `${key} must be true or false`;
   if ((body.sidebarHidden !== undefined || body.welcomed !== undefined) && !bot?.defaultBot) return "Only MausBot is hidden this way; archive or delete other bots.";
+  if (body.defaultBot !== undefined && body.defaultBot !== null) return "defaultBot can only be cleared (null), never set by a patch";
   return body.hidden === true && bot?.defaultBot ? defaultBotRefusal(bot.name) : null;
 }
 
@@ -65,6 +67,14 @@ function remember(dataDir: string, person: string, botId: string): void {
   writeFileAtomic(join(dataDir, LEDGER), JSON.stringify({ v: 1, places: { ...places, [person]: botId } }), { mode: 0o600 });
 }
 
+/** A member who left: should they join again, they are given a MausBot of their own again. */
+export function forgetDefaultBot(dataDir: string, person: string): void {
+  const places = ledger(dataDir);
+  if (!person || !Object.hasOwn(places, person)) return;
+  delete places[person];
+  writeFileAtomic(join(dataDir, LEDGER), JSON.stringify({ v: 1, places }), { mode: 0o600 });
+}
+
 /** A new install's own MausBot from before it was marked: the place's oldest bot, still live, outside any department,
  * not installed from a package, and still named MausBot or still in the colour a new install gave it. */
 export function seededMausBot(bots: readonly BotRecord[]): BotRecord | undefined {
@@ -85,14 +95,14 @@ function introduce(store: DefaultBotStore, bot: BotRecord, team?: string | null)
 export type DefaultBotIntro = (bot: BotRecord) => Omit<Message, "id" | "at">;
 
 /** A new MausBot, with its intro as its first message. On a Team Cloud it is its member's alone. */
-export function createDefaultBot(store: DefaultBotStore, options: { person?: string; team?: string | null; chief?: (id: string) => void; intro?: DefaultBotIntro } = {}): BotRecord {
+export function createDefaultBot(store: DefaultBotStore, options: { person?: string; team?: string | null; chief?: (id: string) => void; intro?: DefaultBotIntro; opened?: (bot: BotRecord) => void } = {}): BotRecord {
   const person = options.person?.trim().toLowerCase() ?? "";
   const taken = new Set(person ? [] : store.bots.map((bot) => bot.name.trim().toLowerCase()));
   const created = store.createBot({
     name: takeImportName(DEFAULT_BOT_NAME, taken),
     color: DEFAULT_BOT_COLOR,
     ...(person ? { visibility: { people: [person] } } : {}),
-  }, { seedMessages: false });
+  }, { seedMessages: false, beforeShown: (made) => options.opened?.({ ...made, defaultBot: person ? { person } : {} }) });
   options.chief?.(created.id);
   const bot = store.patchBot(created.id, { defaultBot: person ? { person } : {} }) ?? created;
   store.appendMessage(bot.threadId, options.intro?.(bot) ?? helperIntroMessage(bot, options.team));
@@ -103,7 +113,8 @@ export function createDefaultBot(store: DefaultBotStore, options: { person?: str
  * install's own adopted, or a new one. A MausBot that is gone is never made again. Two marked ones keep the oldest. A
  * place with no Chief of Staff at all gets MausBot as its Chief, so someone keeps an eye on the day; one that has a
  * Chief keeps it. */
-export function ensureDefaultBot(store: DefaultBotStore, options: { dataDir: string; person?: string; team?: string | null }): BotRecord | null {
+/** `opened`: a new one, before anyone is told of it, so its person's main chat is theirs from its first frame. */
+export function ensureDefaultBot(store: DefaultBotStore, options: { dataDir: string; person?: string; team?: string | null; opened?: (bot: BotRecord) => void }): BotRecord | null {
   const person = options.person?.trim().toLowerCase() ?? "";
   const marked = store.bots.filter((bot) => bot.defaultBot && defaultBotPerson(bot) === person)
     .sort((a, b) => a.createdAt - b.createdAt);
@@ -121,17 +132,37 @@ export function ensureDefaultBot(store: DefaultBotStore, options: { dataDir: str
     chief?.(bot.id);
     introduce(store, bot, options.team);
   } else {
-    bot = createDefaultBot(store, { person, team: options.team, chief });
+    bot = createDefaultBot(store, { person, team: options.team, chief, opened: options.opened });
   }
   remember(options.dataDir, person, bot.id);
   return bot;
 }
 
-/** A move brought this place's MausBot from another computer: it becomes the one MausBot here, and the one this place
- * had becomes an ordinary bot (retireUnusedStarter archives it when nobody used it). */
-export function takeArrivingDefaultBot(store: Pick<Store, "bots" | "patchBot">, id: string): void {
+/** True once the person has made this bot their own: written to it, opened a second chat, or changed who it is. */
+function usedBot(store: Pick<Store, "messagesFor">, bot: BotRecord): boolean {
+  if (bot.soul?.trim() || bot.title || bot.description || bot.avatarUrl || (bot.tasks?.length ?? 1) > 1) return true;
+  return store.messagesFor(bot.threadId).some((message) => message.role === "user");
+}
+
+/** This place's own MausBot that stays the MausBot when another arrives by a move: the visible one the person already used. */
+export function keptDefaultBot(store: Pick<Store, "bots" | "messagesFor">, arrivingId: string): BotRecord | undefined {
+  return store.bots.find((bot) => bot.id !== arrivingId && bot.defaultBot && !defaultBotPerson(bot) && !bot.hidden && usedBot(store, bot));
+}
+
+/** A move brought this place's MausBot from another computer. When nobody used the MausBot this place had, the arriving
+ * one becomes the one MausBot here, and the one this place had becomes an ordinary bot (retireUnusedStarter archives it).
+ * When this place's own MausBot was used, it stays the MausBot, and the arriving one becomes an ordinary bot that can be
+ * deleted, named for the computer it came from so the two are told apart. */
+export function takeArrivingDefaultBot(store: Pick<Store, "bots" | "patchBot" | "messagesFor">, id: string, computer?: string): void {
   const arriving = store.bots.find((bot) => bot.id === id);
   if (!arriving) return;
+  const kept = keptDefaultBot(store, id);
+  if (kept) {
+    const from = computer?.trim() || "another computer";
+    const plain = [DEFAULT_BOT_NAME, kept.name].map((name) => name.trim().toLowerCase()).includes(arriving.name.trim().toLowerCase());
+    store.patchBot(id, { defaultBot: undefined, sidebarHidden: undefined, ...(plain ? { name: `${DEFAULT_BOT_NAME} (from ${from})` } : {}) });
+    return;
+  }
   for (const bot of store.bots) {
     if (bot.id !== id && bot.defaultBot && !defaultBotPerson(bot)) store.patchBot(bot.id, { defaultBot: undefined, sidebarHidden: undefined });
   }
@@ -144,8 +175,6 @@ export function takeArrivingDefaultBot(store: Pick<Store, "bots" | "patchBot">, 
 export function retireUnusedStarter(store: Pick<Store, "bot" | "patchBot" | "messagesFor">, dataDir: string): void {
   const own = ledger(dataDir)[""];
   const seed = own ? store.bot(own) : null;
-  if (!seed || seed.defaultBot || seed.chiefOfStaff || seed.hidden) return;
-  if (seed.soul?.trim() || seed.title || seed.description || seed.avatarUrl || (seed.tasks?.length ?? 1) > 1) return;
-  if (store.messagesFor(seed.threadId).some((message) => message.role === "user")) return;
+  if (!seed || seed.defaultBot || seed.chiefOfStaff || seed.hidden || usedBot(store, seed)) return;
   store.patchBot(seed.id, { hidden: true, pinned: undefined });
 }

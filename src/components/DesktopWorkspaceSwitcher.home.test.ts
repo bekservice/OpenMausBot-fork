@@ -30,6 +30,19 @@ it("in a window whose home is My Cloud, names My Cloud with nothing to open: no 
   expect(menu).not.toHaveBeenCalled();
 });
 
+it("in a window whose home is My Cloud, names it as the top bar does: its own name, else the team's, else My Cloud", async () => {
+  const home = { local: false, origin: "https://omb-u-1a2b3c4d5e6f.fly.dev", home: true };
+  const label = () => host.querySelector("[data-cloud-home-indicator]")?.textContent ?? "";
+  for (const props of [{ cloudHome: true }, { cloudHome: true, inline: true, pill: true }]) {
+    await show({ ...home, name: "Juniper Cloud" }, props);
+    expect(label(), JSON.stringify(props)).toBe("Juniper Cloud");
+    await show({ ...home, name: "Juniper Cloud" }, { ...props, place: "Acme Labs" });
+    expect(label(), JSON.stringify(props)).toBe("Acme Labs");
+    await show({ ...home, name: "My Cloud" }, props);
+    expect(label(), JSON.stringify(props)).toBe("My Cloud");
+  }
+});
+
 it("anywhere else keeps the switcher as it was", async () => {
   await show({ local: false, name: "My Cloud", origin: "https://omb-u-1a2b3c4d5e6f.fly.dev" }, { cloudHome: true });
   expect(host.querySelector("button")?.getAttribute("aria-haspopup")).toBe("menu");
@@ -51,5 +64,14 @@ it("says always on only when My Cloud's verified plan never sleeps, on its pages
     }
     await show(home, props);
     expect(label(), "no plan to read").toBe("My Cloud");
+  }
+});
+
+it("in a browser on a team's Cloud names the team, never My Cloud", async () => {
+  delete window.ogb;
+  for (const props of [{ cloudHome: true, place: "Acme Labs" }, { cloudHome: true, inline: true, pill: true, place: "Acme Labs" }]) {
+    flushSync(() => root.render(createElement(DesktopWorkspaceSwitcher, props)));
+    await vi.waitFor(() => expect(host.querySelector("[data-cloud-home-indicator]")?.textContent).toContain("Acme Labs"));
+    expect(host.textContent, JSON.stringify(props)).not.toContain("My Cloud");
   }
 });

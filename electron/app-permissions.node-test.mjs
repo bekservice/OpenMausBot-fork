@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { readFileSync } from "node:fs";
-import { appPermissionAllowed, appPermissionHandlers, externalWebUrl, remoteClipboardWriteAllowed } from "./app-permissions.mjs";
+import { appPermissionAllowed, appPermissionHandlers, emailDraftUrl, externalLinkUrl, externalWebUrl, obsidianNoteUrl, remoteClipboardWriteAllowed } from "./app-permissions.mjs";
+import { boatClaimMailto } from "../src/lib/boat-offer.ts";
 import { cloudPlanSnapshot, createCloudAccountClient } from "./cloud-account.mjs";
 import { myCloudOrigin, rememberedCloudHome } from "./cloud-home.mjs";
 
@@ -76,11 +77,72 @@ test("web links reject embedded credentials and non-web schemes", () => {
     assert.throws(() => externalWebUrl(url), /web address/);
 });
 
+test("an email link opens only as a draft to one address with a subject and a body", () => {
+  const draft = "mailto:support@example.com?subject=Hello%20there&body=Line%20one%0D%0ALine%20two";
+  assert.equal(emailDraftUrl(draft), draft);
+  assert.equal(externalLinkUrl(draft), draft);
+  assert.equal(externalLinkUrl("MAILTO:support@example.com?Subject=Hi"), "mailto:support@example.com?Subject=Hi");
+  assert.equal(externalLinkUrl("https://example.com/help"), "https://example.com/help");
+  for (const url of ["mailto:a@example.com,b@example.com", "mailto:a%2Cb@example.com", "mailto:?to=a@example.com", "mailto:", "mailto:nobody"])
+    assert.throws(() => externalLinkUrl(url), /one address/, url);
+  for (const url of ["mailto:a@example.com?attach=/etc/passwd", "mailto:a@example.com?subject=Hi&cc=b@example.com", "mailto:a@example.com?bcc=b@example.com",
+    "mailto:a@example.com?to=b@example.com", "mailto:a@example.com?Attachment=~/.ssh/id_rsa"])
+    assert.throws(() => externalLinkUrl(url), /only a subject and a body/, url);
+  assert.throws(() => emailDraftUrl("mailto:a%E0%A4%A@example.com"), /invalid/);
+  assert.throws(() => emailDraftUrl("https://example.com"), /Only email links/);
+  for (const url of ["file:///tmp/test", "javascript:alert(1)", "data:text/html,test", "tel:+15555550100", "sms:+15555550100"])
+    assert.throws(() => externalLinkUrl(url), /Only web/, url);
+  for (const url of [null, 123, "not a url"])
+    assert.throws(() => externalLinkUrl(url), /web address/);
+});
+
+test("an Obsidian link opens only a note in a named vault", () => {
+  for (const [link, opened] of [
+    ["obsidian://open?vault=botbrain&file=agents%2Fchief", "obsidian://open?vault=botbrain&file=agents%2Fchief"],
+    ["OBSIDIAN://open?vault=Bot%20Brain&file=agents%2FChief%20Notes%23Inbox", "obsidian://open?vault=Bot%20Brain&file=agents%2FChief%20Notes%23Inbox"],
+    ["obsidian://open?file=daily%2F2026-11-22.md&vault=botbrain", "obsidian://open?file=daily%2F2026-11-22.md&vault=botbrain"],
+    ["obsidian://open?vault=botbrain&file=C%2B%2B%20notes", "obsidian://open?vault=botbrain&file=C%2B%2B%20notes"],
+    ["obsidian://open?vault=botbrain", "obsidian://open?vault=botbrain"],
+    [" obsidian://open?vault=botbrain&file=agents%2Fbo ", "obsidian://open?vault=botbrain&file=agents%2Fbo"],
+  ]) assert.equal(externalLinkUrl(link), opened, link);
+
+  for (const link of ["obsidian://new?vault=botbrain&file=x&content=hi", "obsidian://search?vault=botbrain&query=x",
+    "obsidian://advanced-uri?vault=botbrain&commandid=editor%3Asave-file", "obsidian://choose-vault", "obsidian:///home/tyler/botbrain/note.md",
+    "obsidian://vault/botbrain/agents/chief", "obsidian://open/?vault=botbrain", "obsidian://open?vault=botbrain#x",
+    "obsidian://user@open?vault=botbrain", "obsidian:"])
+    assert.throws(() => externalLinkUrl(link), /only opens a note/, link);
+  for (const link of ["obsidian://open?path=%2Fhome%2Ftyler%2Fbotbrain", "obsidian://open?vault=botbrain&file=x&paneType=window",
+    "obsidian://open?vault=botbrain&vault=other", "obsidian://open?vault=botbrain&file=a&file=b", "obsidian://open?vault=botbrain&file=a=b",
+    "obsidian://open?vault=botbrain&&file=x", "obsidian://open?vault=botbrain&x-success=https%3A%2F%2Fexample.com"])
+    assert.throws(() => externalLinkUrl(link), /only a vault and a file/, link);
+  for (const link of ["obsidian://open", "obsidian://open?file=agents%2Fchief"])
+    assert.throws(() => externalLinkUrl(link), /names its vault/, link);
+  for (const link of ["obsidian://open?vault=botbrain&file=..%2F..%2F.ssh%2Fid_ed25519", "obsidian://open?vault=botbrain&file=agents%2F..%2F..%2Fx",
+    "obsidian://open?vault=botbrain&file=%2Fetc%2Fpasswd", "obsidian://open?vault=botbrain&file=%5C%5Cserver%5Cshare",
+    "obsidian://open?vault=botbrain&file=C%3A%5CUsers", "obsidian://open?vault=botbrain&file=~%2F.bashrc"])
+    assert.throws(() => externalLinkUrl(link), /inside its vault/, link);
+  for (const link of ["obsidian://open?vault=botbrain&file=", "obsidian://open?vault=%20&file=x", "obsidian://open?vault=botbrain&file=a%0Ab",
+    "obsidian://open?vault=botbrain&file=a%09b", "obsidian://open?vault=botbrain&file=a%0Db", "obsidian://open?vault=botbrain&file=a%7Fb",
+    "obsidian://open?vault=botbrain&file=%E0%A4%A", "obsidian://open?vault=botbrain&file=a+b"])
+    assert.throws(() => externalLinkUrl(link), /invalid/, link);
+  for (const link of ["obsidian://open?vault=botbrain&file=a\tb", "obsidian://open?vault=botbrain&file=a\rb", "obsidian://open?vault=botbrain&file=a\nb",
+    "obsidian://open?vault=bot\nbrain&file=x", "obsidian://op\ten?vault=botbrain", "obsidian://open?vault=botbrain&file=x\n"])
+    assert.throws(() => externalLinkUrl(link), /invalid/, JSON.stringify(link));
+  assert.throws(() => obsidianNoteUrl("https://example.com"), /Only Obsidian links/);
+  for (const link of ["obsidianx://open?vault=botbrain", "x-obsidian://open?vault=botbrain", "zotero://select/items/1", "vscode://file/etc/passwd"])
+    assert.throws(() => externalLinkUrl(link), /Only web/, link);
+});
+
+test("the app's claim to Boat opens exactly as the app drafts it", () => {
+  assert.equal(externalLinkUrl(boatClaimMailto()), boatClaimMailto());
+});
+
 test("both external-link entry points use the policy and IPC retains the local-origin gate", () => {
   const main = readFileSync(new URL("./main.mjs", import.meta.url), "utf8");
   assert.match(main, /ipcMain\.handle\("desktop:open-external", localOnly\("desktop:open-external"/);
-  assert.match(main, /shell\.openExternal\(externalWebUrl\(rawUrl\)\)/);
-  assert.match(main, /shell\.openExternal\(externalWebUrl\(url\)\)/);
+  assert.match(main, /shell\.openExternal\(externalLinkUrl\(rawUrl\)\)/);
+  assert.match(main, /shell\.openExternal\(externalLinkUrl\(url\)\)/);
+  assert.doesNotMatch(main, /shell\.openExternal\(externalWebUrl\(/);
 });
 
 test("fails closed on unparsable or opaque origins", () => {
@@ -197,7 +259,7 @@ test("the verified Cloud open in this window may write the clipboard, by the rem
   assert.equal(ask(write, onCloud(), { getURL: () => `${CLOUD}/` }), false, "the main window is gone");
 });
 
-test("once My Cloud is home its page may show notifications, in the main window's main frame only; any other page still may not", () => {
+test("once My Cloud is home its page may show notifications and go fullscreen, in the main window's main frame only; any other page still may not", () => {
   const state = { home: null, main: { getURL: () => `${CLOUD}/chat` } };
   const handlers = appPermissionHandlers({ rendererOrigin: () => LOCAL_ORIGIN, mainContents: () => state.main, cloudHomeOrigin: () => CLOUD, homeOrigin: () => state.home });
   const ask = (details, contents = state.main) => { let granted; handlers.request(contents, "notifications", (value) => { granted = value; }, details); return granted; };
@@ -210,7 +272,9 @@ test("once My Cloud is home its page may show notifications, in the main window'
   assert.equal(check(CLOUD, {}), false, "a frame it cannot vouch for");
   assert.equal(ask(onCloud(), { getURL: () => `${CLOUD}/` }), false, "another window");
   assert.equal(ask({ requestingUrl: "https://bots.example.test/", isMainFrame: true }), false, "another server");
-  for (const permission of ["geolocation", "camera", "clipboard-read", "fullscreen"]) {
+  let fullscreen; handlers.request(state.main, "fullscreen", (value) => { fullscreen = value; }, onCloud());
+  assert.equal(fullscreen, true, "a chat video's fullscreen button");
+  for (const permission of ["geolocation", "camera", "clipboard-read"]) {
     let granted; handlers.request(state.main, permission, (value) => { granted = value; }, onCloud());
     assert.equal(granted, false, permission);
   }
@@ -246,7 +310,7 @@ test("the app installs these handlers, with its one rule for My Cloud and a wait
   assert.match(main, /cloudPageSenderAllowed\(event, \{ contents, homeOrigin: myCloud\(\),/);
   assert.doesNotMatch(main, /rememberedHome\??\.accountId/);
   assert.doesNotMatch(main, /remembered: true/);
-  assert.match(main, /cloudAccountRestoring = true;\n\s+cloudAccountStarted = ensureCloudAccount\(\)\.start\(\)\.catch\(\(\) => \{\}\)\.finally\(\(\) => \{ cloudAccountRestoring = false; \}\);/);
+  assert.match(main, /cloudAccountRestoring = true;\n\s+cloudAccountStarted = ensureCloudAccount\(\)\.start\(\)\.catch\(\(\) => \{\}\)\.then\(\(\) => accountRing\(\)\?\.start\(\)\)\.finally\(\(\) => \{ cloudAccountRestoring = false; \}\);/);
 });
 
 const ADMIN = "http://127.0.0.1:9";
@@ -499,4 +563,32 @@ test("the base policy itself still grants a remote origin nothing", () => {
   for (const permission of ["clipboard-sanitized-write", "clipboard-read", "notifications", "fullscreen"]) {
     assert.equal(appPermissionAllowed(permission, REMOTE, LOCAL_ORIGIN, { isMainFrame: true }), false, permission);
   }
+});
+
+test("the active remote server's page may show notifications and go fullscreen, in the main window's main frame only", () => {
+  const state = { remote: REMOTE, main: { getURL: () => `${REMOTE}/chat` } };
+  const handlers = appPermissionHandlers({ rendererOrigin: () => LOCAL_ORIGIN, mainContents: () => state.main, cloudHomeOrigin: () => null,
+    activeRemoteOrigin: () => state.remote });
+  const onRemote = (extra = {}) => ({ requestingUrl: `${REMOTE}/settings`, isMainFrame: true, ...extra });
+  const ask = (details, contents = state.main, permission = "notifications") => {
+    let granted; handlers.request(contents, permission, (value) => { granted = value; }, details); return granted;
+  };
+  assert.equal(ask(onRemote()), true);
+  assert.equal(handlers.check(state.main, "notifications", REMOTE, { isMainFrame: true }), true);
+  assert.equal(ask(onRemote({ isMainFrame: false })), false, "a frame inside it");
+  assert.equal(handlers.check(state.main, "notifications", REMOTE, {}), false, "a frame it cannot vouch for");
+  assert.equal(ask(onRemote(), { getURL: () => `${REMOTE}/` }), false, "another window");
+  assert.equal(ask(onRemote({ requestingUrl: "https://other.tail1.ts.net:9444/" })), false, "another server");
+  assert.equal(ask(onRemote(), state.main, "fullscreen"), true, "a chat video's fullscreen button");
+  assert.equal(handlers.check(state.main, "fullscreen", REMOTE, { isMainFrame: true }), true);
+  assert.equal(ask(onRemote({ isMainFrame: false }), state.main, "fullscreen"), false, "fullscreen from a frame inside it");
+  assert.equal(ask(onRemote({ requestingUrl: "https://other.tail1.ts.net:9444/" }), state.main, "fullscreen"), false, "fullscreen for another server");
+  assert.equal(ask(onRemote(), { getURL: () => `${REMOTE}/` }, "fullscreen"), false, "fullscreen in another window");
+  for (const permission of ["geolocation", "camera", "clipboard-read"]) {
+    assert.equal(ask(onRemote(), state.main, permission), false, permission);
+  }
+  state.remote = null;
+  assert.equal(ask(onRemote()), false, "no active remote: at once");
+  assert.equal(ask(onRemote(), state.main, "fullscreen"), false, "no active remote: no fullscreen");
+  for (const requesting of ["about:blank", "data:text/html,x", ""]) assert.equal(ask(onRemote({ requestingUrl: requesting })), false, `${requesting || "(empty)"}`);
 });

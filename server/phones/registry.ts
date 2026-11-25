@@ -1,26 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 
-import { PHONE_CAPABILITIES, PHONE_PLATFORMS } from "../../shared/phone-apps.ts";
+import { phoneRegistration, type PhoneRegistration } from "../../shared/phone-jobs.ts";
 import { writeFileAtomic } from "../atomic.ts";
 
-const KNOWN_CAPABILITIES: readonly string[] = PHONE_CAPABILITIES;
-/** Only the apps this server knows: a newer phone's extra app is dropped, never a reason to refuse the rest. */
-const knownCapabilities = (value: unknown) => (value && typeof value === "object" && !Array.isArray(value)
-  ? Object.fromEntries(Object.entries(value).filter(([capability]) => KNOWN_CAPABILITIES.includes(capability)))
-  : value);
-
-/** The phones ship on their own schedule, so a field this server does not know yet is stripped, not refused. */
-export const phoneRegistration = z.object({
-  installId: z.string().regex(/^[\w-]{8,64}$/),
-  name: z.string().min(1).max(120),
-  platform: z.enum(PHONE_PLATFORMS),
-  appVersion: z.string().max(40),
-  timeZone: z.string().max(64),
-  /** Capability → the OS grant the phone holds ("full", "limited", "when_in_use", "send", "listener"); present means allowed. */
-  capabilities: z.preprocess(knownCapabilities, z.partialRecord(z.enum(PHONE_CAPABILITIES), z.string().min(1).max(32))),
-});
-export type PhoneRegistration = z.infer<typeof phoneRegistration>;
+export { phoneRegistration, type PhoneRegistration };
 
 const KEY = z.string().min(1).max(300);
 const recordSchema = z.object({
@@ -48,6 +32,7 @@ export class PhoneRegistry {
   private readonly now: () => number;
   private phones = new Map<string, PhoneRecord>();
   private written = new Map<string, number>();
+  private removalPending = false;
   /** Removed on the computer: such a key never registers again; pairing the phone again gives it a new one. */
   private removed = new Set<string>();
 
@@ -67,9 +52,14 @@ export class PhoneRegistry {
     }
   }
 
-  private save(): void {
-    try { writeFileAtomic(this.file, `${JSON.stringify({ version: 1, phones: [...this.phones.values()], blocked: [...this.removed] })}\n`, { mode: 0o600 }); }
-    catch (error) { console.warn(`phones: could not save the record of paired phones: ${error instanceof Error ? error.message : String(error)}`); }
+  private save(required = false): void {
+    try {
+      writeFileAtomic(this.file, `${JSON.stringify({ version: 1, phones: [...this.phones.values()], blocked: [...this.removed] })}\n`, { mode: 0o600 });
+      this.removalPending = false;
+    } catch (error) {
+      console.warn(`phones: could not save the record of paired phones: ${error instanceof Error ? error.message : String(error)}`);
+      if (required) throw error;
+    }
   }
 
   /** Same key: update. Same owner + installId under another key: replace that record, keeping its history. A key the
@@ -120,7 +110,8 @@ export class PhoneRegistry {
       this.removed.add(key);
       for (const oldest of this.removed) { if (this.removed.size <= MAX_BLOCKED) break; this.removed.delete(oldest); }
     }
-    if (removed || blocking) this.save();
+    if (removed || blocking) this.removalPending = true;
+    if (this.removalPending) this.save(true);
     return removed;
   }
 

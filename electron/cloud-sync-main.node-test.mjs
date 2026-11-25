@@ -64,6 +64,23 @@ test("Files channels answer this computer's own window only, and share only a fo
   assert.doesNotThrow(() => installed.close());
 });
 
+test("Files starts when the Documents folder can't be found, and keeps bot outputs in the home folder's Documents", async (t) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "omb-files-documents-")));
+  const handlers = new Map(), opened = [];
+  const installed = installCloudFiles({
+    app: { getPath: (name) => { if (name === "documents") throw new Error("Failed to get 'documents' path"); return join(dir, name); } },
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, dialog: {},
+    shell: { trashItem: async () => {}, openPath: async (folder) => { opened.push(folder); return ""; } }, powerMonitor: { on: () => {} },
+    fetch: async () => { throw new Error("offline"); }, localWorkspaceOnly: (_channel, handler) => handler, send: () => {}, cloudOrigin: () => null,
+    cloudAccount: () => ({ openDashboard: async () => {} }), localDataDir: join(dir, "home", ".openmausbot"),
+  });
+  t.after(() => { installed.close(); rmSync(dir, { recursive: true, force: true }); });
+  const outputs = join(dir, "home", "Documents", "MausBot");
+  assert.equal((await handlers.get("files:state")({})).outputs.dir, outputs);
+  await handlers.get("files:open")({}, { outputs: true });
+  assert.deepEqual(opened, [outputs]);
+});
+
 test("a folder added on the Files page is lent, read only, and Stop sharing takes it back from lending", async (t) => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "omb-files-lend-")));
   const picked = join(dir, "home", "Clients");
@@ -74,7 +91,7 @@ test("a folder added on the Files page is lent, read only, and Stop sharing take
   const saves = [];
   const sharing = {
     cloudState: () => state, lentToCloud: () => (state.enabled ? { lendingId: "8b6f1c1e-3d6a-4a8e-9f1e-0a1b2c3d4e5f", folders: state.folders, protectedPaths: [] } : { off: true }),
-    saveCloud: async (_env, input) => { saves.push(input); state = { ...state, ...input, enabled: true }; }, revoke: () => { saves.push("revoked"); state = { ...state, enabled: false }; },
+    saveCloud: async (_env, input) => { saves.push(input); state = { ...state, ...input, enabled: true }; return state; }, revoke: () => { saves.push("revoked"); state = { ...state, enabled: false }; },
   };
   const installed = installCloudFiles({
     app: { getPath: (name) => join(dir, name) }, ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },

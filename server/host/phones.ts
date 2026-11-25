@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { cloudHomeLendingRefusal, createCloudRoutineAuthors, type CloudLendingTurn } from "../cloud-lending.ts";
+import { cloudHomeLendingRefusal, createCloudRoutineAuthors, type CloudLendingRefusal, type CloudLendingTurn } from "../cloud-lending.ts";
 import { personKey } from "../person-key.ts";
 import type { PhoneBot, PhonePlace } from "../phones/access.ts";
 import { createPhoneHost } from "../phones/host.ts";
@@ -14,8 +14,8 @@ import { PhoneRegistry } from "../phones/registry.ts";
 import { createPhoneSends } from "../phones/sends.ts";
 import type { LoopbackTrust, RequestAuth } from "../request-auth.ts";
 import type { Routine } from "../routines.ts";
-import { createPhoneRoutes, phoneKey } from "../routes/phones.ts";
-import type { PublicSession } from "../sessions.ts";
+import { createPhoneRoutes, PHONE_ACCESS_CHANGED, phoneKey } from "../routes/phones.ts";
+import type { SessionRegistry } from "../sessions.ts";
 import type { BotRecord, Store } from "../store.ts";
 import type { PromptPart } from "../system-prompt.ts";
 
@@ -23,6 +23,9 @@ type Turn = { botId: string; threadId: string; generation: string };
 
 /** The owner of a desktop's phones: whoever works at this machine or holds an admin session. */
 const DESKTOP_OWNER = "owner";
+
+/** Why a turn is not the owner's own: a server several people share, a service-trust machine, or the lent-computer verdict. */
+export type TurnOwnerRefusal = "shared" | "service" | CloudLendingRefusal | "memory-changed" | "memory-changed-here";
 
 export interface PhonesDeps {
   dataDir: string;
@@ -34,12 +37,12 @@ export interface PhonesDeps {
   loopbackTrust: LoopbackTrust;
   sharedMembership(): boolean;
   store: Pick<Store, "appendMessage" | "bot" | "groupByThread" | "messagesFor">;
-  sessions: { list(): PublicSession[] };
+  sessions: Pick<SessionRegistry, "list" | "isLive" | "onSessionRevoked">;
   routines(): { listRoutines(): Routine[] } | null;
   ownerOrAdmin(auth: RequestAuth): boolean;
   cloudOwnerSession(auth: RequestAuth): boolean;
   /** The lent-Mac test on a Cloud home: null when the turn may use the owner's things. */
-  cloudLendingRefusal(turn: Turn): string | null;
+  cloudLendingRefusal(turn: Turn): CloudLendingRefusal | "memory-changed" | "memory-changed-here" | null;
   cloudLendingTurn(turn: Turn): CloudLendingTurn;
   /** The harness's record says this turn's work came from the user. */
   originIsUser(turn: Turn): boolean;
@@ -60,6 +63,11 @@ export function createPhones(deps: PhonesDeps) {
   const registry = new PhoneRegistry(join(deps.dataDir, "phones.json"));
   const sends = createPhoneSends();
   const jobs = new PhoneJobs((phone, id) => deps.nudge({ kind: "device.job", phone, id }));
+  const unsubscribe = deps.sessions.onSessionRevoked((id) => {
+    const key = `session:${id}`;
+    try { registry.remove(key); } catch {}
+    jobs.drop(key, PHONE_ACCESS_CHANGED);
+  });
   const ownerRoutinesFile = join(deps.dataDir, "owner-routines.json");
   const routineRecordsExisted = existsSync(ownerRoutinesFile);
   /** Off a Cloud home: the routines the desktop owner wrote, so their runs and reports keep the owner's phones. */
@@ -76,9 +84,15 @@ export function createPhones(deps: PhonesDeps) {
 
   /** Whose phones a turn may use: on a Cloud home the owner's, when the lent Mac would allow the turn; elsewhere the desktop owner's. */
   function turnOwner(turn: Turn): string | null {
-    if (deps.shared) return null;
-    if (deps.cloudHome) return deps.cloudLendingRefusal(turn) === null ? deps.cloudOwnerKey : null;
-    if (!desktopPhones()) return null;
+    if (turnOwnerRefusal(turn) !== null) return null;
+    return deps.cloudHome ? deps.cloudOwnerKey : DESKTOP_OWNER;
+  }
+
+  /** Null when the turn is the owner's own (turnOwner); otherwise why not. */
+  function turnOwnerRefusal(turn: Turn): TurnOwnerRefusal | null {
+    if (deps.shared) return "shared";
+    if (deps.cloudHome) return deps.cloudLendingRefusal(turn);
+    if (!desktopPhones()) return deps.sharedMembership() ? "shared" : "service";
     const lending = desktopLendingTurn({ ...deps.cloudLendingTurn(turn), thread: store.messagesFor(turn.threadId) }, {
       adminPersons: () => new Set(deps.sessions.list().filter((session) => session.scopes.includes("admin")).map((session) => personKey(session))),
       originIsUser: () => deps.originIsUser(turn),
@@ -87,7 +101,7 @@ export function createPhones(deps: PhonesDeps) {
         return Boolean(routine && routineAuthors?.authored(routine.id, routine));
       },
     });
-    return cloudHomeLendingRefusal(lending) === null ? DESKTOP_OWNER : null;
+    return cloudHomeLendingRefusal(lending);
   }
 
   const fromPhone = (auth: RequestAuth): boolean => {
@@ -113,6 +127,7 @@ export function createPhones(deps: PhonesDeps) {
       return sendId;
     },
     turnOwner,
+    turnOwnerRefusal,
     /** Where the person is, from where the turn came from: the phone's send, the person at the computer, or nobody. */
     place(threadId: string, personAsked: boolean): PhonePlace {
       const request = deps.request(threadId);
@@ -136,7 +151,7 @@ export function createPhones(deps: PhonesDeps) {
     },
     handle: host.handle,
     toolListing: host.toolListing,
-    routes: createPhoneRoutes({ registry, jobs, owner: ownerOf, isAdmin: deps.ownerOrAdmin }),
+    routes: createPhoneRoutes({ registry, jobs, owner: ownerOf, isAdmin: deps.ownerOrAdmin, live: (auth) => auth.kind !== "session" || deps.sessions.isLive(auth.session.id) }),
     /** How many phones run the phone app here. */
     paired: (): number => registry.list(null, () => false).length,
     /** Routines written before records were kept are the owner's on a single-person desktop: record them once. */
@@ -155,6 +170,6 @@ export function createPhones(deps: PhonesDeps) {
       if (!deps.ownerOrAdmin(auth)) routineAuthors.forget(routine.id);
       else if (ownersAgain) routineAuthors.record(routine.id, routine);
     },
-    close: () => jobs.close(),
+    close: () => { unsubscribe(); jobs.close(); },
   };
 }

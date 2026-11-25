@@ -89,39 +89,17 @@ What the screenshot looks like when the recipe passes (`evidence/chat-ui/chat-ui
 
 The permanent form of this recipe is `scripts/testing/control-omb-ui.e2e.test.ts`:
 
-The fixture also hit-tests the rendered empty band beside **This run**. It
-must target the conversation rather than the transparent dock, while points
-inside the card and composer still target those controls. This checks browser
-pointer targeting, not native OS wheel delivery.
-
 ```sh
 OMB_UI_E2E=1 pnpm exec vitest run scripts/testing/control-omb-ui.e2e.test.ts
 ```
 
-The asserted recipe now also covers the floating **This run** card with a
-successful, failed, and dry-run command. The card records every shell command
-the bot ran in the current ask — the commands after the person's last message —
-and marks the ones that went through the control CLI **verified**; reads
-(`cat`, `git log`, `gh pr view`, a `curl` that only fetches) and computer-use
-are left out, and a run of one unverified command shows no card. Those tool
-outcomes are **simulated provider events**, not executions of the commands
-written in the chips; the card's summary reads `3 steps · 3 verified · 1 failed
-· 1 dry run`. The recipe then presses **Save as skill**, which fills the
-composer in one of two shapes. A run with a verified step opens with the
-trigger phrase (`Create a verification skill from the run below.`), then
-`Goal: hello` (the person's request), the rule not to re-run, and one line per
-step with the verified ones tagged `(verified)`. A run with no verified step
-asks in plain words instead — `Save the steps below as a reusable skill for my
-review.`, then `Goal: <request>`, then "Keep the exact commands and note the
-failed ones as gotchas. Do not re-run anything.", then the step lines; the
-server (`server/skill-learn.ts`) expands a turn that opens with that sentence
-into the same skill-authoring turn as `/learn`, so nobody sees or types a slash
-command. In both shapes the caret is in the composer and no new user message
-was sent — the transcript still holds exactly one `StaticText "hello"`. The person adds any notes and
-sends as usual; the card never sends on its own. Separately, the recipe runs a
-real fixture health check and verifies that clicking a deliberately missing
-control fails. The card remains collapsible; the old execution timeline is no
-longer shown above chat.
+A run of two real steps or more (a command that changed something, an app
+action, a file written, a page opened) also floats the **Skill Burger** card in
+the chat's corner: one layer per step, the ask on its top bun, and **Add skill**
+as its bottom bun, which saves the run as a workflow skill in one click, with
+an Undo. Its unit and DOM tests are `shared/skill-burger/draft.test.ts`,
+`server/skill-burger/*.test.ts` and
+`src/components/skill-burger/SkillBurger.dom.test.ts`.
 
 For activity detail, click **More → Inspector → Run Log**. It shows the selected
 conversation's recorded commands, statuses and timestamps; command previews
@@ -134,8 +112,10 @@ unasserted user outcome.
 
 `scripts/testing/usage-details-ui.e2e.test.ts` checks the header's **More** menu,
 usage breakdown, clipboard success and refusal, and responsive geometry at
-390, 800, 1100 and 1600 px. It checks that opening bot settings folds the sidebar
-without changing its saved density and closing settings restores it. Evidence
+390, 800, 1100 and 1600 px. It checks that opening Advanced's bot settings at 1100
+folds the sidebar without changing its saved density and closing settings
+restores it, and that Simple's 320px bot panel keeps the 280px sidebar open
+beside a chat of at least 440 at 1040 px, folding it at 1039. Evidence
 includes screenshots and a `.usage-details.json` next to the fixture log.
 These are renderer checks, not native Windows caption-button verification.
 
@@ -223,6 +203,90 @@ checks that the finished reply still moves a following transcript to its end.
 ```sh
 pnpm exec vitest run src/state/store.test.ts src/components/ChatView.follow.test.ts
 ```
+
+## What a bot is doing right now
+
+While a step runs, the working line names it ("Running scrape.py", "Searching the
+web for “Acme construction leads”", "Reading linkedin.com"), with the whole command on
+hover. Once the step has run past the quiet notice it adds how it is doing: the
+time since its last output, or what its own processes show ("waiting on the
+network", "busy, no output yet", "idle, no output yet"). A click on the line,
+or Enter on it, unfolds the **Now** card: the current ask's steps, a running
+command's last lines of output and **Open activity**, which opens the Activity
+panel at this run. A second click or Escape folds it. A working bot's sidebar
+row shows the same step in place of its last message.
+
+A scripted call with `hold` stays running until `FAKE_CLAUDE_RELEASE` exists;
+`hold: "busy"`, `"idle"` or `"network"` also keeps a stand-in process that
+burns CPU, sleeps or holds a loopback connection, as the call's command would.
+The quiet-status knobs cross into the fixture, so the sign of life shows in
+seconds:
+
+```sh
+OMB_ACP_QUIET_NOTICE_MS=10000 OMB_ACP_QUIET_TICK_MS=2000 FAKE_CLAUDE_RELEASE=/tmp/release \
+node --experimental-strip-types scripts/control-omb.ts ui launch --tool-calls \
+  '[{"name":"WebSearch","input":{"query":"Acme construction leads"},"ok":true},
+    {"name":"Bash","input":{"command":"cd ~/acme && python3 scrape.py --pages 40"},"hold":"busy"}]'
+```
+
+Expected after a sent message: `Working · 15s · Running scrape.py · busy, no
+output yet`, the button `What Pepper is doing` with `aria-expanded="false"`,
+and, once clicked, a card listing `Searched the web for “Acme construction leads”` and
+`Running scrape.py`. Claude Code prints a command's output only when it ends,
+so streamed output needs an engine that sends it: `--engine codex` adds the
+fake Codex app-server, and `FAKE_CODEX_COMMAND`, `FAKE_CODEX_COMMAND_OUTPUT`
+(JSON chunks), `FAKE_CODEX_COMMAND_OUTPUT_MS` and `FAKE_CODEX_COMMAND_GATE`
+script its command. A bot moved to the `codex` instance then shows `last
+output just now` and the command's last two lines in the card.
+
+## A reply as it streams
+
+The bot's words appear as they arrive, keyed by the id the server streams each
+message under, and the saved message takes the streamed bubble's place in the
+same frame. One command streams every scripted case through the real renderer,
+once per engine, and checks each frame:
+
+```sh
+node --experimental-strip-types scripts/verify-live-reply.ts \
+  --engines claude,codex,acp,cline,copilot --out .omb-scratch/verify-evidence/live-reply
+```
+
+Each engine gets its own fixture (`ui launch --engine codex|acp|cline|copilot`);
+its fake plays the case named by a marker in the prompt from
+`FAKE_STREAM_SCRIPT` at `FAKE_STREAM_CADENCE` (the cases are
+`server/testing/live-reply-cases.ts`: short and long replies, Markdown, code
+fences, math, emoji and right-to-left text, links and images, text and tools
+interleaved, two messages in a row, a blank message, thinking, Stop, a steer,
+an error, a reconnect, a chat switch, and a room with two bots). Expected: a
+`pass` for every case in the printed table, which is also written to
+`results.md` with each case's screenshot and evidence. Steering is checked
+where the fake steers (Claude).
+
+`--engines opencode` with `OMB_VERIFY_OPENCODE_CLI` set to an OpenCode the
+recipe downloaded and checked against `server/drivers/acp/opencode-release.ts`
+runs real prompts on a free model OpenCode offers with no sign-in, in the
+fixture's temporary home.
+
+The engine-level checks, which need no browser, are
+`server/drivers/acp/live-reply-matrix.test.ts` (every ACP engine),
+`server/drivers/claude-live-reply.test.ts`, and the case runs in
+`server/drivers/codex.test.ts`, `server/drivers/pi.test.ts` and
+`server/drivers/openai-chat-tools.test.ts` (each OpenAI-compatible provider).
+The client's checks are `src/state/live-reply.test.ts`,
+`src/components/ChatView.live-reply.test.ts` and
+`src/components/ChatMarkdown.streaming.test.ts`.
+
+The before-and-after screenshots were removed because they showed real example
+data; run the `scripts/control-omb.ts ui launch` command above to see the
+working line and the Now card.
+
+The checks are `server/step-summary.test.ts` (the words and their redaction),
+`server/harness/live-steps.test.ts` and `server/harness/bus.test.ts` (one path
+for every engine, the sign of life, the output's last lines),
+`server/bot-visibility.test.ts` (a step reaches only someone who may see the
+chat), `src/components/TurnPresence.test.ts`,
+`src/components/ChatView.live-status.test.ts` (the line and the card) and
+`src/components/Sidebar.simple-mode.test.ts` (the sidebar row).
 
 ## Bot setup and MCP access recipe
 

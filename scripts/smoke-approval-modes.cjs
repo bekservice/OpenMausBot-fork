@@ -357,6 +357,7 @@ app.whenReady().then(async () => {
   }
   const questionBot = (await api("/api/bots", "POST", { modelSelection: { instanceId: "agy-question", model: "gemini-3.8-flash-high" } })).body.bot;
   await coordinator.request(child, questionBot.id, "full");
+  await until(async () => (await api("/api/bots?messages=0")).body.bots.every((bot) => !bot.busy));
   assert.equal((await api(`/api/bots/${questionBot.id}/messages`, "POST", { text: "Ask me a question under Full" })).status, 202);
   const question = await until(async () => pendingCard((await api("/api/bots")).body.bots.find((bot) => bot.id === questionBot.id)));
   assert.deepEqual(question.options, ["Blue", "Green"]);
@@ -370,7 +371,6 @@ app.whenReady().then(async () => {
   const peerThread = (await api(`/api/bots/${peerTarget.id}/tasks`, "POST", { title: "Unrelated selected conversation" })).body.task;
   await coordinator.request(child, peerTarget.id, "full");
   await coordinator.request(child, peerTarget.id, "full", { threadId: peerThread.threadId });
-  assert.equal((await api(`/api/bots/${id}`, "PATCH", { approvePeerComms: false })).status, 200);
   const capability = await api("/api/testing/internal-capability", "POST", { botId: id, threadId: created.body.bot.threadId }, { "x-openmausbot-test-capability": testCapabilityKey });
   assert.equal(capability.status, 201);
   const peerResponse = await api("/api/internal/coordinate-bots", "POST", { botIds: [peerTarget.id], message: "Peer-initiated permission fixture", consult: true }, { authorization: `Bearer ${capability.body.token}` });
@@ -403,7 +403,8 @@ app.whenReady().then(async () => {
   assert.equal(askPeerResponse.body.receipts[0].threadId, peerWorkThreadId);
   const peerCard = await until(async () => pendingCard((await api(`/api/threads/${peerWorkThreadId}/messages`)).body));
   assert.equal(lastPrompt().mode, "default");
-  const askDecision = (await api("/api/decisions")).body.decisions.find((row) => row.threadId === peerWorkThreadId && row.requestId === peerCard.requestId);
+  // The card can show before its decision row is written: wait for the row, as the checks above do.
+  const askDecision = await until(async () => (await api("/api/decisions")).body.decisions.find((row) => row.threadId === peerWorkThreadId && row.requestId === peerCard.requestId));
   assert.equal(askDecision.decision, "card-shown");
   assert.notEqual(askDecision.source, "full-access");
   assert.equal((await api(`/api/threads/${peerWorkThreadId}/respond`, "POST", { requestId: peerCard.requestId, behavior: "allow" })).status, 200);

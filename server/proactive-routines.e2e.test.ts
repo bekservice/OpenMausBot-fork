@@ -189,6 +189,27 @@ describe("MausBot keeps an eye on the day, hidden from the sidebar", () => {
     expect(shown).not.toMatch(/Needs you|Your day|Reconnect Gmail/);
     delete apps.gmailError;
   });
+
+  it("a MausBot limited to some Gmail accounts names one of them in every read, also while the account lookup fails", async () => {
+    apps.accounts = { gmail: [{ id: "ca_other", status: "ACTIVE" }, { id: "ca_mine", status: "ACTIVE" }] };
+    await api("PATCH", `/api/bots/${chief.id}`, { connectorScopes: { apps: { gmail: "read", googlecalendar: "read" }, accounts: { gmail: ["ca_gone", "ca_mine"] } } });
+    const gmailAccounts = () => apps.calls.filter((call) => call.tool.startsWith("GMAIL_")).map((call) => call.item.account);
+    // The check's connected list answers; the account lookup after it does not, so the reads name the first allowed one.
+    apps.inventoryFailsAfter = 1;
+    apps.calls.length = 0;
+    await settled((await runNow()).id);
+    expect(apps.inventoryFailsAfter).toBeLessThan(0);
+    expect(gmailAccounts().length).toBeGreaterThan(0);
+    expect(new Set(gmailAccounts())).toEqual(new Set(["ca_gone"]));
+    for (const call of apps.calls.filter((one) => one.tool.startsWith("GOOGLECALENDAR_"))) expect(call.item).not.toHaveProperty("account");
+    // The lookup answers again: the next check asks it and reads the allowed account that is active.
+    delete apps.inventoryFailsAfter;
+    apps.calls.length = 0;
+    await settled((await runNow()).id);
+    expect(gmailAccounts().length).toBeGreaterThan(0);
+    expect(new Set(gmailAccounts())).toEqual(new Set(["ca_mine"]));
+    apps.accounts = {};
+  });
 });
 
 describe("a read-and-draft run", () => {
@@ -236,6 +257,9 @@ describe("a read-and-draft run", () => {
     const decisions = readFileSync(join(fixture.info.dataDir, "decisions", `${month}.ndjson`), "utf8");
     const dump = JSON.parse(readFileSync(fixture.fixtureDumpPath, "utf8"));
     expect(Object.keys(dump.mcpConfig.mcpServers).sort()).toEqual(["agents", "composio", "ogb"]);
+    expect(dump.systemPrompt).not.toContain("Your enabled automations");
+    expect(dump.systemPrompt).not.toContain("Pause a temporary monitor");
+    expect(dump.systemPrompt).toContain("within its read-and-draft limits");
     const read = transcript.find((message) => message.kind === "activity" && String(message.tool?.output).includes("GMAIL_FETCH_EMAILS"));
     expect(String(read.tool.output)).toContain("[Records from a connected app (Gmail or Google Calendar).");
 

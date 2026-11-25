@@ -1,3 +1,4 @@
+import { serverFetch } from "./relay-server";
 // A Cloud home on a plan that sleeps tells its pages it is going to sleep (a `power` frame on the event stream, or an
 // "asleep" answer). From then on the page sends nothing in the background: any request reaching the Cloud would wake it.
 // The next thing the person does (a click, a key, the window regaining focus) wakes it again, which takes about a second.
@@ -34,7 +35,7 @@ function set(next: boolean) {
  * "asleep". */
 export function markCloudAwake(): void {
   if (!asleep) return;
-  void fetch(WAKE_PATH).catch(() => {});
+  void serverFetch(WAKE_PATH).catch(() => {});
   detach?.();
   detach = null;
   set(false);
@@ -49,6 +50,24 @@ export function markCloudAsleep(target: Pick<Window, "addEventListener" | "remov
   const events = ["pointerdown", "keydown", "focus", "touchstart"] as const;
   for (const name of events) target.addEventListener(name, wake, { capture: true });
   detach = () => { for (const name of events) target.removeEventListener(name, wake, { capture: true }); };
+}
+
+/** The page is out of sight: a background tab, a minimized or hidden window. */
+export function pageHidden(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
+/** Resolves once the page shows again (at once when it isn't hidden); rejects if `signal` aborts first. */
+export function pageShown(signal?: AbortSignal): Promise<void> {
+  if (!pageHidden()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const done = () => { document.removeEventListener("visibilitychange", check); signal?.removeEventListener("abort", abort); };
+    const check = () => { if (!pageHidden()) { done(); resolve(); } };
+    const abort = () => { done(); reject(signal?.reason ?? new DOMException("The request was aborted.", "AbortError")); };
+    if (signal?.aborted) { abort(); return; }
+    document.addEventListener("visibilitychange", check);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 /** An "asleep" answer from the home (held polls and refused background requests carry it). */

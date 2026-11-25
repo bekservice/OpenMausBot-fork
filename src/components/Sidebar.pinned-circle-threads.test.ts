@@ -50,7 +50,7 @@ const frame = (markup: string) => {
 };
 
 const row = (candidate: Bot, selectedId = initialState.selectedId) =>
-  botRowProps({ ...initialState, selectedId, activeView: "chat" }, vi.fn(), candidate, { density: "comfortable", quiet: false, query: "", onMenu: vi.fn() });
+  botRowProps({ ...initialState, selectedId, activeView: "chat" }, vi.fn(), candidate, { density: "comfortable", query: "", onMenu: vi.fn() });
 
 function renderCircle(candidate: Bot, selected = false) {
   return renderToStaticMarkup(createElement(PinnedBotCircle, row(candidate, selected ? candidate.id : initialState.selectedId)));
@@ -93,6 +93,30 @@ describe("pinned circle frame", () => {
     expect(clipped).toContain("ring-accent");
     expect(clipped).toContain("border-radius:22%");
     expect(clipped).not.toContain("rounded-full");
+  });
+
+  it("ignores archived unread threads on the circle and collapsed pinned section while marking open unread ones", () => {
+    const archivedOnly = bot({
+      unread: true,
+      tasks: [
+        { threadId: "thread-atlas", title: "Open read", createdAt: 2, unread: false },
+        { threadId: "thread-hidden", title: "Archived unread", createdAt: 1, unread: true, archivedAt: 10 },
+      ],
+    });
+    const circleMarkup = renderCircle(archivedOnly);
+    expect(circleMarkup).not.toContain('aria-label="Unread threads"');
+    expect(circleMarkup).not.toContain("Atlas · Unread");
+    expect(renderThreads(true, [archivedOnly])).not.toContain("unread");
+
+    const openUnread = bot({
+      unread: false,
+      tasks: [
+        { threadId: "thread-atlas", title: "Open read", createdAt: 2, unread: false },
+        { threadId: "thread-open", title: "Open unread", createdAt: 1, unread: true },
+      ],
+    });
+    expect(renderCircle(openUnread)).toContain('aria-label="Unread threads"');
+    expect(renderThreads(true, [openUnread])).toContain("1 unread");
   });
 });
 

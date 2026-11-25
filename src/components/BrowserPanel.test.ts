@@ -13,7 +13,7 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock("@/state/store", async (importOriginal) => ({ ...await importOriginal<typeof import("@/state/store")>(), api: fixture.api, useStore: () => ({ state: fixture.state }) }));
 vi.mock("./BrowserProfilesManager", () => ({ BrowserProfilesManager: () => null }));
-const { LiveBrowser } = await import("./BrowserPanel");
+const { BrowserPanel, LiveBrowser } = await import("./BrowserPanel");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -115,11 +115,11 @@ describe("the browser panel's connection", () => {
     expect(host.querySelector("[data-browser-transport]")!.getAttribute("data-browser-transport")).toBe("stream");
   });
 
-  it("uses the v1 live view on agent-browser, and when the stream is refused before it opens", async () => {
+  it("uses the v1 live view on agent-browser, sized to the panel, and when the stream is refused before it opens", async () => {
     fixture.state.config.browserEngine = { kind: "engine", engine: "agent-browser" };
     await render();
     expect(FakeSocket.instances).toHaveLength(0);
-    expect(FixtureEventSource.instances[0]!.url).toBe("/api/bots/pepper/browser/live");
+    expect(FixtureEventSource.instances[0]!.url).toBe("/api/bots/pepper/browser/live?selects=1&width=1600&height=1000");
     act(() => root.unmount());
     root = createRoot(host);
     fixture.state.config.browserEngine = { kind: "engine", engine: "chrome" };
@@ -128,6 +128,24 @@ describe("the browser panel's connection", () => {
     await flush();
     expect(FixtureEventSource.instances).toHaveLength(2);
     expect(host.querySelector("[data-browser-transport]")!.getAttribute("data-browser-transport")).toBe("live");
+  });
+
+  it("reconnects by itself, on the stream, when its server restarts, and shows no Reconnect", async () => {
+    const socket = await streaming();
+    const before = FakeSocket.instances.length;
+    // The server stops: it closes the view with the reconnect code, then refuses while it starts again.
+    await act(async () => socket.dispatchEvent(Object.assign(new Event("close"), { code: 1012, reason: "The server is restarting." })));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    expect(FakeSocket.instances.length).toBe(before + 1);
+    await act(async () => FakeSocket.instances.at(-1)!.refuse());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_100)); });
+    const next = FakeSocket.instances.at(-1)!;
+    expect(next).not.toBe(socket);
+    expect(button("Reconnect")).toBeUndefined();
+    expect(host.querySelector("[data-browser-transport]")!.getAttribute("data-browser-transport")).toBe("stream");
+    await act(async () => { next.open(); next.control("agent"); next.message(new ArrayBuffer(8)); });
+    await flush();
+    expect(button("Reconnect")).toBeUndefined();
   });
 
   it("says the browser is starting until its first frame arrives", async () => {
@@ -216,7 +234,7 @@ describe("a v1 live view whose stream dropped", () => {
     expect(host.textContent).toContain("Browser disconnected");
     await act(async () => button("Reconnect").click());
     await flush();
-    expect(live().url).toBe("/api/bots/pepper/browser/live?resume=old-viewer");
+    expect(live().url).toBe("/api/bots/pepper/browser/live?resume=old-viewer&selects=1&width=1600&height=1000");
     await emit("ready", { viewerId: "new-viewer" });
     expect(host.textContent).not.toContain("Browser disconnected");
   });
@@ -251,7 +269,7 @@ describe("a v1 live view whose stream dropped", () => {
     expect(host.textContent).toContain("Browser disconnected");
     await act(async () => { window.dispatchEvent(new Event("focus")); });
     expect(FixtureEventSource.instances).toHaveLength(7);
-    expect(live().url).toBe("/api/bots/pepper/browser/live?resume=old-viewer");
+    expect(live().url).toBe("/api/bots/pepper/browser/live?resume=old-viewer&selects=1&width=1600&height=1000");
     await emit("ready", { viewerId: "back-viewer" });
     expect(host.textContent).not.toContain("Browser disconnected");
   });
@@ -271,6 +289,29 @@ describe("who holds the browser", () => {
     await act(async () => pill().click());
     await flush();
     expect(socket.sent.at(-1)).toEqual({ type: "releaseControl" });
+  });
+
+  it("says what keeping the browser means while the person has it", async () => {
+    const socket = await streaming("agent");
+    await act(async () => pill().click());
+    await act(async () => socket.control("you"));
+    await flush();
+    expect(pill().title).toBe(t("browser.control.keptHint", { name: "Pepper" }));
+    expect(pill().title).toContain("5 minutes");
+  });
+
+  it("shows the person their hold from another of their views, and hands it back from here", async () => {
+    const socket = await streaming("agent");
+    await act(async () => socket.control("agent", { owned: true }));
+    await flush();
+    expect(pill().dataset.pill).toBe("held");
+    expect(pill().textContent).toContain("Pepper is paused for you");
+    expect(pill().textContent).toContain(t("browser.control.handBack"));
+    expect(pill().disabled).toBe(false);
+    expect(host.textContent).not.toContain(BROWSER_HELD_ELSEWHERE);
+    await act(async () => pill().click());
+    await flush();
+    expect(socket.sent).toEqual([{ type: "releaseControl" }]);
   });
 
   it("takes the browser on the first click and then sends that click, once", async () => {
@@ -373,6 +414,44 @@ describe("what the person does in the panel", () => {
     await flush();
     expect(socket.sent.at(-1)).toEqual({ type: "navigate", url: "https://accounts.example.com/login" });
   });
+
+  it("wakes a browser that sat unused before taking it for a sign-in", async () => {
+    await render({ signIn: { url: "https://accounts.example.com/login", site: "example.com", nonce: 1 } });
+    const socket = FakeSocket.instances.at(-1)!;
+    await act(async () => { socket.open(); socket.control("unclaimed"); socket.message({ type: "asleep" }); });
+    await flush();
+    expect(socket.sent).toEqual([{ type: "wake" }]);
+    await act(async () => socket.message({ type: "asleep" }));
+    await flush();
+    expect(socket.sent).toEqual([{ type: "wake" }]);
+    await act(async () => {
+      socket.message({ type: "awake" });
+      socket.message({ type: "tabs", tabs: [{ tabId: "t1", title: "", url: "about:blank", active: true }] });
+    });
+    await flush();
+    expect(socket.sent).toEqual([{ type: "wake" }, { type: "takeControl" }]);
+    await act(async () => socket.control("you"));
+    await flush();
+    expect(socket.sent.at(-1)).toEqual({ type: "navigate", url: "https://accounts.example.com/login" });
+  });
+  it("opens the sign-in page on the woken browser's blank tab, not the page it had before sleeping", async () => {
+    await render({ signIn: { url: "https://accounts.example.com/login", site: "example.com", nonce: 1 } });
+    const socket = FakeSocket.instances.at(-1)!;
+    await act(async () => {
+      socket.open();
+      socket.message({ type: "tabs", tabs: [{ tabId: "t1", title: "Docs", url: "https://docs.example.com/", active: true }] });
+      socket.control("unclaimed");
+      socket.message({ type: "asleep" });
+    });
+    await flush();
+    expect(socket.sent).toEqual([{ type: "wake" }]);
+    await act(async () => socket.message({ type: "awake" }));
+    await flush();
+    await act(async () => socket.message({ type: "tabs", tabs: [{ tabId: "t2", title: "", url: "about:blank", active: true }] }));
+    await act(async () => socket.control("you"));
+    await flush();
+    expect(socket.sent.at(-1)).toEqual({ type: "navigate", url: "https://accounts.example.com/login" });
+  });
 });
 
 describe("a published page's Open", () => {
@@ -455,5 +534,27 @@ describe("a sign-in that stops at a passkey", () => {
     const again = await streaming("you");
     await go(again, PASSKEY);
     expect(notice()?.textContent).toContain(t("browser.passkey.lendPc", { name: "Pepper" }));
+  });
+});
+
+describe("the browser panel before the browser is installed", () => {
+  async function renderUninstalled(scopes: string[]) {
+    fixture.state = { config: { browserProfiles: [], browserEngine: { kind: "unavailable", installable: true } }, computerControl: {} };
+    fixture.api.mockImplementation(async (path: string) => path === "/api/auth/session" ? { scopes } : { ok: true });
+    await act(async () => root.render(createElement(BrowserPanel, { bot })));
+    await flush();
+  }
+
+  it("offers the install here instead of sending an admin to the panel they are on", async () => {
+    await renderUninstalled(["admin"]);
+    expect(host.textContent).toContain(t("browser.panel.engineNotInstalledHelp", { name: "Pepper" }));
+    expect(host.textContent).not.toContain(t("browser.notInstalled"));
+    expect(button(t("browser.panel.installEngine")).disabled).toBe(false);
+  });
+
+  it("keeps the setup steps for someone who cannot install", async () => {
+    await renderUninstalled([]);
+    expect(host.textContent).toContain(t("browser.notInstalled"));
+    expect(button(t("browser.panel.installEngine")).disabled).toBe(true);
   });
 });

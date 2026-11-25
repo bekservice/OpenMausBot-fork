@@ -38,7 +38,7 @@ function world(overrides: Partial<PhonesDeps> = {}) {
   const phones = createPhones({
     dataDir: dir, shared: false, cloudHome: false, cloudOwnerKey: null, loopbackTrust: "owner", sharedMembership: () => false,
     store: { messagesFor: () => lines, bot: () => chief, groupByThread: () => undefined, appendMessage: () => {} } as unknown as PhonesDeps["store"],
-    sessions: { list: () => [] }, routines: () => null, ownerOrAdmin: (auth) => auth.scopes.includes("admin"), cloudOwnerSession: () => false,
+    sessions: { list: () => [], isLive: () => true, onSessionRevoked: () => () => {} }, routines: () => null, ownerOrAdmin: (auth) => auth.scopes.includes("admin"), cloudOwnerSession: () => false,
     cloudLendingRefusal: () => null,
     cloudLendingTurn: () => ({ thread: lines, request: { ...requests.get(THREAD), generations: new Set([TURN.generation]) }, generation: TURN.generation, starters: [], reportsFromOthers: false,
       ownerPerson: () => true, cardAnswerer: () => undefined, routineRun: () => null }) as unknown as CloudLendingTurn,
@@ -114,21 +114,25 @@ describe("whose phones", () => {
     expect(phones.fromPhone(loopback)).toBe(false);
     // No request this turn can prove: no phone.
     expect(phones.turnOwner(TURN)).toBeNull();
+    expect(phones.turnOwnerRefusal(TURN)).toBe("unproven");
     send(phones.sendIdFor(loopback));
     expect(phones.turnOwner(TURN)).toBe("owner");
+    expect(phones.turnOwnerRefusal(TURN)).toBeNull();
     expect(phones.integration(chief, TURN)).toMatchObject({ env: { OMB_MCP_TOKEN_DEVICE: "turn-token", OMB_HARNESS_URL: "http://127.0.0.1:1" } });
     // A line from a person who holds no admin session here is not the owner's, nor is anything after it.
     send("guest-send-0000000001", { origin: { kind: "user" } }, "p_guest");
     expect(phones.turnOwner(TURN)).toBeNull();
+    expect(phones.turnOwnerRefusal(TURN)).not.toBeNull();
     expect(phones.integration(chief, TURN)).toBeNull();
   });
 
   it("a Team Cloud or hosted workspace, a server several people sign in to, and a service-trust machine get no phone", () => {
-    for (const overrides of [{ shared: true }, { sharedMembership: () => true }, { loopbackTrust: "service" as const }]) {
+    for (const [overrides, why] of [[{ shared: true }, "shared"], [{ sharedMembership: () => true }, "shared"], [{ loopbackTrust: "service" as const }, "service"]] as const) {
       const { phones, send } = world(overrides);
       send(phones.sendIdFor(loopback));
       expect(phones.fromPhone(session(PHONE_SESSION))).toBe(true);
       expect(phones.turnOwner(TURN)).toBeNull();
+      expect(phones.turnOwnerRefusal(TURN)).toBe(why);
       expect(phones.integration(chief, TURN)).toBeNull();
       expect(phones.previewParts(chief, true)).toEqual([]);
       expect(phones.promptParts(chief, { mounted: false, offered: true, turn: TURN, place: "computer" })).toEqual([{ id: "device", label: "Phone", text: "" }]);
@@ -136,11 +140,12 @@ describe("whose phones", () => {
   });
 
   it("on a Cloud home only the owner's session holds a phone, and only a turn the lent Mac would allow reaches it", () => {
-    let refusal: string | null = null;
+    let refusal: ReturnType<PhonesDeps["cloudLendingRefusal"]> = null;
     const { phones } = world({ cloudHome: true, cloudOwnerKey: "owner", cloudOwnerSession: (auth) => auth.kind === "session" && auth.session.id === PHONE_SESSION.id, cloudLendingRefusal: () => refusal });
     expect(phones.turnOwner(TURN)).toBe("owner");
     refusal = "someone-else";
     expect(phones.turnOwner(TURN)).toBeNull();
+    expect(phones.turnOwnerRefusal(TURN)).toBe("someone-else");
     expect(phones.integration(chief, TURN)).toBeNull();
   });
 });
